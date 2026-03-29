@@ -49,9 +49,12 @@ services:
     depends_on:
       - obsidian-headless
     volumes:
-      - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
-    command: bash -c "npm install express cors && node server.js"
+    command: bash -c "
+      git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo &&
+      cp /tmp/repo/obsidian-api.js . &&
+      npm install express cors && node server.js
+    "
     expose:
       - "3000"
     environment:
