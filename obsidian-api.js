@@ -224,38 +224,20 @@ app.get('/api/search', (req, res) => {
   }
 });
 
-// Get agent context and endpoints info
+// Get agent context (agent.md only)
 app.get('/api/agent/context', (req, res) => {
   try {
-    let memory = '';
-    let rules = '';
-
+    let agent = '';
+ 
     try {
-      memory = fs.readFileSync(path.join(VAULT_PATH, '_system/MEMORY.md'), 'utf-8');
+      agent = fs.readFileSync(path.join(VAULT_PATH, 'agent.md'), 'utf-8');
     } catch {
-      memory = 'MEMORY.md not found';
+      agent = 'agent.md not found';
     }
-
-    try {
-      rules = fs.readFileSync(path.join(VAULT_PATH, '_system/agent_rules.md'), 'utf-8');
-    } catch {
-      rules = 'agent_rules.md not found';
-    }
-
+ 
     res.json({
-      memory,
-      rules,
-      vault_path: VAULT_PATH,
-      endpoints: {
-        list_files: 'GET /api/files?type=meeting-summary&project=MEN',
-        read_file: 'GET /api/file/:path',
-        write_file: 'POST /api/file/:path',
-        update_frontmatter: 'PATCH /api/file/:path',
-        search: 'GET /api/search?q=query',
-        agent_context: 'GET /api/agent/context',
-        sync_trigger: 'POST /api/sync',
-        sync_status: 'GET /api/sync/status'
-      }
+      agent,
+      vault_path: VAULT_PATH
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
