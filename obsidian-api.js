@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const yaml = require('js-yaml');
 const { execSync } = require('child_process');
 
 const app = express();
@@ -18,7 +19,6 @@ app.use((req, res, next) => {
   if (req.path === '/health') {
     return next();
   }
-
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token || token !== API_TOKEN) {
     return res.status(401).json({ error: 'Unauthorized: Invalid or missing API token' });
@@ -31,18 +31,85 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', vault: VAULT_PATH });
 });
 
-// List all markdown files
+// Helper: Parse frontmatter from content
+function parseFrontmatter(content) {
+  const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  let frontmatter = {};
+  let body = content;
+
+  if (frontmatterMatch) {
+    try {
+      frontmatter = yaml.load(frontmatterMatch[1]) || {};
+      body = frontmatterMatch[2];
+    } catch (e) {
+      // If YAML parsing fails, return raw content
+      body = content;
+    }
+  }
+
+  return { frontmatter, body };
+}
+
+// Helper: Format content with frontmatter
+function formatContent(frontmatter, body) {
+  return `---\n${yaml.dump(frontmatter, { defaultFlowLevel: 2 })}---\n${body}`;
+}
+
+// List all markdown files with optional filters
 app.get('/api/files', (req, res) => {
   try {
-    const files = execSync(`find ${VAULT_PATH} -name "*.md" -type f`).toString().split('\n').filter(f => f);
-    const relativePaths = files.map(f => path.relative(VAULT_PATH, f));
-    res.json({ files: relativePaths });
+    const { type, project, path: filterPath } = req.query;
+
+    const files = execSync(`find ${VAULT_PATH} -name "*.md" -type f`)
+      .toString()
+      .split('\n')
+      .filter(f => f);
+
+    const results = files
+      .map(filePath => {
+        try {
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const relativePath = path.relative(VAULT_PATH, filePath);
+          const { frontmatter } = parseFrontmatter(content);
+
+          return {
+            path: relativePath,
+            frontmatter,
+            hasContent: content.length > 0
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(f => f)
+      .filter(f => {
+        // Filter by type (frontmatter prop)
+        if (type && f.frontmatter.type !== type) return false;
+        // Filter by project (frontmatter prop)
+        if (project && f.frontmatter.project !== project) return false;
+        // Filter by path pattern (optional)
+        if (filterPath && !f.path.includes(filterPath)) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        // Sort by date if available
+        if (a.frontmatter.date && b.frontmatter.date) {
+          return new Date(b.frontmatter.date) - new Date(a.frontmatter.date);
+        }
+        return a.path.localeCompare(b.path);
+      });
+
+    res.json({
+      files: results,
+      count: results.length,
+      filters: { type, project, path: filterPath }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Read a file
+// Read a file with parsed frontmatter
 app.get(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
     const filePath = path.join(VAULT_PATH, req.params[0]);
@@ -57,13 +124,20 @@ app.get(/^\/api\/file\/(.+)$/, (req, res) => {
     }
 
     const content = fs.readFileSync(filePath, 'utf-8');
-    res.json({ content, path: req.params[0] });
+    const { frontmatter, body } = parseFrontmatter(content);
+
+    res.json({
+      path: req.params[0],
+      frontmatter,
+      body,
+      content
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Write/create a file
+// Create or write a complete file
 app.post(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
     const filePath = path.join(VAULT_PATH, req.params[0]);
@@ -79,9 +153,45 @@ app.post(/^\/api\/file\/(.+)$/, (req, res) => {
       fs.mkdirSync(dir, { recursive: true });
     }
 
-    fs.writeFileSync(filePath, req.body.content, 'utf-8');
+    // Write content
+    const content = req.body.content || '';
+    fs.writeFileSync(filePath, content, 'utf-8');
 
     res.json({ success: true, path: req.params[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update frontmatter only (PATCH)
+app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+
+    // Security: prevent directory traversal
+    if (!filePath.startsWith(VAULT_PATH)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const { frontmatter, body } = parseFrontmatter(content);
+
+    // Merge with new frontmatter
+    const updatedFrontmatter = { ...frontmatter, ...req.body };
+
+    // Write back
+    const newContent = formatContent(updatedFrontmatter, body);
+    fs.writeFileSync(filePath, newContent, 'utf-8');
+
+    res.json({
+      success: true,
+      path: req.params[0],
+      frontmatter: updatedFrontmatter
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -92,22 +202,63 @@ app.get('/api/search', (req, res) => {
   try {
     const query = req.query.q;
     if (!query) {
-      return res.status(400).json({ error: 'Query parameter required' });
+      return res.status(400).json({ error: 'Query parameter (q) required' });
     }
 
-    const results = execSync(`grep -r "${query}" ${VAULT_PATH} --include="*.md"`)
+    const results = execSync(`grep -r "${query.replace(/"/g, '\\"')}" ${VAULT_PATH} --include="*.md"`)
       .toString()
       .split('\n')
       .filter(line => line)
       .map(line => {
         const [filePath, ...content] = line.split(':');
-        return { file: path.relative(VAULT_PATH, filePath), match: content.join(':') };
+        return {
+          file: path.relative(VAULT_PATH, filePath),
+          match: content.join(':')
+        };
       });
 
-    res.json({ query, results });
+    res.json({ query, results, count: results.length });
   } catch (error) {
     // grep returns error if no matches found
-    res.json({ query, results: [] });
+    res.json({ query, results: [], count: 0 });
+  }
+});
+
+// Get agent context and endpoints info
+app.get('/api/agent/context', (req, res) => {
+  try {
+    let memory = '';
+    let rules = '';
+
+    try {
+      memory = fs.readFileSync(path.join(VAULT_PATH, '_system/MEMORY.md'), 'utf-8');
+    } catch {
+      memory = 'MEMORY.md not found';
+    }
+
+    try {
+      rules = fs.readFileSync(path.join(VAULT_PATH, '_system/agent_rules.md'), 'utf-8');
+    } catch {
+      rules = 'agent_rules.md not found';
+    }
+
+    res.json({
+      memory,
+      rules,
+      vault_path: VAULT_PATH,
+      endpoints: {
+        list_files: 'GET /api/files?type=meeting-summary&project=MEN',
+        read_file: 'GET /api/file/:path',
+        write_file: 'POST /api/file/:path',
+        update_frontmatter: 'PATCH /api/file/:path',
+        search: 'GET /api/search?q=query',
+        agent_context: 'GET /api/agent/context',
+        sync_trigger: 'POST /api/sync',
+        sync_status: 'GET /api/sync/status'
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -131,7 +282,10 @@ app.get('/api/sync/status', (req, res) => {
   }
 });
 
+// Start server
 app.listen(PORT, () => {
-  console.log(`Obsidian API server running on port ${PORT}`);
-  console.log(`Vault path: ${VAULT_PATH}`);
+  console.log(`🚀 Obsidian API server running on port ${PORT}`);
+  console.log(`📁 Vault path: ${VAULT_PATH}`);
+  console.log(`🔐 Authentication: Bearer token required (except /health)`);
+  console.log(`📚 Documentation: GET /api/agent/context`);
 });
