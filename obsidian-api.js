@@ -7,9 +7,24 @@ const { execSync } = require('child_process');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const VAULT_PATH = process.env.VAULT_PATH || '/vault';
+const API_TOKEN = process.env.API_TOKEN || 'change-me-in-production';
 
 app.use(cors());
 app.use(express.json());
+
+// Authentication middleware
+app.use((req, res, next) => {
+  // Health check doesn't require auth
+  if (req.path === '/health') {
+    return next();
+  }
+
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token || token !== API_TOKEN) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid or missing API token' });
+  }
+  next();
+});
 
 // Health check
 app.get('/health', (req, res) => {
