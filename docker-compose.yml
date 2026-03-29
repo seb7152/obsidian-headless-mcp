@@ -38,23 +38,19 @@ services:
     command: bash -c "
       npm install -g obsidian-headless &&
       ob login --email $$OBSIDIAN_EMAIL --password $$OBSIDIAN_PASSWORD &&
-      ob sync-setup --vault $$VAULT_NAME --path /vault --password '$$VAULT_PASSWORD' --device-name 'Hostinger' &&
+      ob sync-setup --vault $$VAULT_NAME --path /vault --password "$$VAULT_PASSWORD" --device-name 'Hostinger' &&
       ob sync --path /vault --continuous
       "
 
   obsidian-api:
     image: node:22
     restart: unless-stopped
-    working_dir: /app
+    working_dir: /tmp/app
     depends_on:
       - obsidian-headless
     volumes:
       - ./vault:/vault
-    command: bash -c "
-      git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo &&
-      cp /tmp/repo/obsidian-api.js . &&
-      npm install express cors && node server.js
-    "
+    command: bash -c "mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && npm install express cors && node server.js"
     expose:
       - "3000"
     environment:
