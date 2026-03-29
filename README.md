@@ -66,9 +66,14 @@ Copy `.env.example` to `.env` and fill in:
 ACME_EMAIL=your-email@example.com
 DOMAIN=yourdomain.com
 OBSIDIAN_EMAIL=your-obsidian-email@example.com
-OBSIDIAN_PASSWORD=your-obsidian-password
-VAULT_NAME=Your-Vault-Name
+OBSIDIAN_PASSWORD=your-account-password           # Password to login to Obsidian
+VAULT_PASSWORD=your-vault-encryption-password    # Encryption password for the vault
+VAULT_NAME=Your-Vault-Name                       # Exact vault name in Obsidian Sync
 ```
+
+**Important:** There are two different passwords:
+- **OBSIDIAN_PASSWORD**: Your Obsidian account password (for `ob login`)
+- **VAULT_PASSWORD**: Your vault encryption password (found in Obsidian → Settings → Sync → Encryption)
 
 ### 3. Deploy
 
