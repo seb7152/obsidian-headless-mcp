@@ -1,0 +1,84 @@
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:latest
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - --api.dashboard=false
+      - --api.insecure=false
+      - --log.level=INFO
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge=true
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+    volumes:
+      - traefik-letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  obsidian-headless:
+    image: node:22
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./vault:/vault
+      - obsidian-cache:/root/.obsidian-headless
+    environment:
+      - OBSIDIAN_EMAIL=${OBSIDIAN_EMAIL}
+      - OBSIDIAN_PASSWORD=${OBSIDIAN_PASSWORD}
+      - VAULT_NAME=${VAULT_NAME}
+    command: bash -c "npm install -g obsidian-headless && ob login --email $$OBSIDIAN_EMAIL --password $$OBSIDIAN_PASSWORD && ob sync --vault-name $$VAULT_NAME"
+
+  obsidian-api:
+    image: node:22
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - obsidian-headless
+    volumes:
+      - ./obsidian-api.js:/app/server.js
+      - ./vault:/vault
+    command: bash -c "npm install express cors && node server.js"
+    expose:
+      - "3000"
+    environment:
+      - VAULT_PATH=/vault
+      - PORT=3000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"
+      - "traefik.http.routers.obsidian-api.entrypoints=websecure"
+      - "traefik.http.routers.obsidian-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.obsidian-api.loadbalancer.server.port=3000"
+
+  mcp-obsidian:
+    image: python:3.11
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - obsidian-api
+    volumes:
+      - ./obsidian_mcp.py:/app/obsidian_mcp.py
+    command: bash -c "pip install -q mcp httpx && python obsidian_mcp.py"
+    expose:
+      - "3001"
+    environment:
+      - OBSIDIAN_API_URL=http://obsidian-api:3000/api
+      - PORT=3001
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp-obsidian.rule=Host(`mcp.${DOMAIN}`)"
+      - "traefik.http.routers.mcp-obsidian.entrypoints=websecure"
+      - "traefik.http.routers.mcp-obsidian.tls.certresolver=letsencrypt"
+      - "traefik.http.services.mcp-obsidian.loadbalancer.server.port=3001"
+
+volumes:
+  traefik-letsencrypt:
+  obsidian-cache:
