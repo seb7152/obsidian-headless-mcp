@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   traefik:
     image: traefik:latest
@@ -49,13 +47,15 @@ services:
     depends_on:
       - obsidian-headless
     volumes:
+      - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
-    command: bash -c "mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && npm install express cors && node server.js"
+    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && npm install express cors js-yaml && node server.js"
     expose:
       - "3000"
     environment:
       - VAULT_PATH=/vault
       - PORT=3000
+      - API_TOKEN=${API_TOKEN} 
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"
