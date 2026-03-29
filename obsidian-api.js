@@ -28,9 +28,9 @@ app.get('/api/files', (req, res) => {
 });
 
 // Read a file
-app.get('/api/file/:filePath(*)', (req, res) => {
+app.get(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
-    const filePath = path.join(VAULT_PATH, req.params.filePath);
+    const filePath = path.join(VAULT_PATH, req.params[0]);
 
     // Security: prevent directory traversal
     if (!filePath.startsWith(VAULT_PATH)) {
@@ -42,16 +42,16 @@ app.get('/api/file/:filePath(*)', (req, res) => {
     }
 
     const content = fs.readFileSync(filePath, 'utf-8');
-    res.json({ content, path: req.params.filePath });
+    res.json({ content, path: req.params[0] });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // Write/create a file
-app.post('/api/file/:filePath(*)', (req, res) => {
+app.post(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
-    const filePath = path.join(VAULT_PATH, req.params.filePath);
+    const filePath = path.join(VAULT_PATH, req.params[0]);
 
     // Security: prevent directory traversal
     if (!filePath.startsWith(VAULT_PATH)) {
@@ -66,7 +66,7 @@ app.post('/api/file/:filePath(*)', (req, res) => {
 
     fs.writeFileSync(filePath, req.body.content, 'utf-8');
 
-    res.json({ success: true, path: req.params.filePath });
+    res.json({ success: true, path: req.params[0] });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
