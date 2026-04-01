@@ -199,8 +199,8 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
 
 // Search in vault
 app.get('/api/search', (req, res) => {
+  const query = req.query.q;
   try {
-    const query = req.query.q;
     if (!query) {
       return res.status(400).json({ error: 'Query parameter (q) required' });
     }
