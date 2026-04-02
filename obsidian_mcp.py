@@ -2,12 +2,13 @@
 
 import httpx
 import os
+import secrets
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 
 # Configuration
 OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
-API_TOKEN = os.getenv("API_TOKEN", "change-me-in-production")
+API_TOKEN = os.getenv("API_TOKEN", "")
 PORT = int(os.getenv("PORT", 3001))
 
 # Shared HTTP client — injects Bearer token on every request to the REST API
@@ -34,12 +35,18 @@ class URLTokenAuthMiddleware:
         self.token = token
 
     async def __call__(self, scope, receive, send):
+        # Lifespan events must pass through so FastMCP can manage its session lifecycle
+        if scope["type"] == "lifespan":
+            await self.app(scope, receive, send)
+            return
+
         if scope["type"] in ("http", "websocket"):
             path = scope.get("path", "")
             parts = path.lstrip("/").split("/", 1)
             provided_token = parts[0] if parts else ""
 
-            if provided_token != self.token:
+            # Timing-safe comparison to prevent token enumeration
+            if not self.token or not secrets.compare_digest(provided_token, self.token):
                 if scope["type"] == "http":
                     await send({
                         "type": "http.response.start",
@@ -53,10 +60,11 @@ class URLTokenAuthMiddleware:
                     })
                 return
 
-            # Strip the token prefix from the path before forwarding
+            # Strip the token prefix — Starlette uses both path and raw_path for routing
             new_path = "/" + parts[1] if len(parts) > 1 and parts[1] else "/"
             scope = dict(scope)
             scope["path"] = new_path
+            scope["raw_path"] = new_path.encode("utf-8")
 
         await self.app(scope, receive, send)
 
@@ -211,9 +219,17 @@ def get_sync_status() -> str:
 if __name__ == "__main__":
     print(f"Starting Obsidian MCP Server on port {PORT}")
     print(f"Connected to Obsidian API at: {OBSIDIAN_API_URL}")
-    print(f"Claude web MCP URL: https://<your-domain>/{API_TOKEN}")
+    if not API_TOKEN:
+        raise RuntimeError("API_TOKEN environment variable must be set")
 
-    mcp_asgi = mcp.http_app()
+    print(f"Claude web MCP URL: https://<your-domain>/{API_TOKEN}/mcp")
+
+    # streamable_http_app() returns a Starlette ASGI app (mcp SDK >= 1.9)
+    if hasattr(mcp, "streamable_http_app"):
+        mcp_asgi = mcp.streamable_http_app()
+    else:
+        mcp_asgi = mcp.sse_app()
+
     wrapped_app = URLTokenAuthMiddleware(mcp_asgi, API_TOKEN)
 
-    uvicorn.run(wrapped_app, host="0.0.0.0", port=PORT)
+    uvicorn.run(wrapped_app, host="0.0.0.0", port=PORT, lifespan="on")
