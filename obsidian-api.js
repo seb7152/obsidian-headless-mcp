@@ -3,7 +3,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -60,8 +60,8 @@ app.get('/api/files', (req, res) => {
   try {
     const { type, project, path: filterPath } = req.query;
 
-    const files = execSync(`find ${VAULT_PATH} -name "*.md" -type f`)
-      .toString()
+    const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
+      .stdout
       .split('\n')
       .filter(f => f);
 
@@ -197,6 +197,32 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
   }
 });
 
+// Append content to a file (atomic — no read-modify-write race)
+app.post(/^\/api\/file\/(.+)\/append$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+
+    if (!filePath.startsWith(VAULT_PATH)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const contentToAppend = req.body.content || '';
+    const dir = path.dirname(filePath);
+
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
+    const newContent = existing ? existing + '\n' + contentToAppend : contentToAppend;
+    fs.writeFileSync(filePath, newContent, 'utf-8');
+
+    res.json({ success: true, path: req.params[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Search in vault
 app.get('/api/search', (req, res) => {
   const query = req.query.q;
@@ -205,8 +231,8 @@ app.get('/api/search', (req, res) => {
       return res.status(400).json({ error: 'Query parameter (q) required' });
     }
 
-    const results = execSync(`grep -r "${query.replace(/"/g, '\\"')}" ${VAULT_PATH} --include="*.md"`)
-      .toString()
+    const grep = spawnSync('grep', ['-r', query, '--include=*.md', VAULT_PATH], { encoding: 'utf-8' });
+    const results = (grep.stdout || '')
       .split('\n')
       .filter(line => line)
       .map(line => {
@@ -219,7 +245,6 @@ app.get('/api/search', (req, res) => {
 
     res.json({ query, results, count: results.length });
   } catch (error) {
-    // grep returns error if no matches found
     res.json({ query, results: [], count: 0 });
   }
 });
@@ -247,7 +272,8 @@ app.get('/api/agent/context', (req, res) => {
 // Trigger sync
 app.post('/api/sync', (req, res) => {
   try {
-    execSync('ob sync --vault-name ' + (process.env.VAULT_NAME || 'Vault'));
+    const result = spawnSync('ob', ['sync', '--vault-name', process.env.VAULT_NAME || 'Vault'], { encoding: 'utf-8' });
+    if (result.status !== 0) throw new Error(result.stderr || 'sync failed');
     res.json({ success: true, message: 'Vault synced' });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -257,8 +283,8 @@ app.post('/api/sync', (req, res) => {
 // Get sync status
 app.get('/api/sync/status', (req, res) => {
   try {
-    const status = execSync('ob sync --vault-name ' + (process.env.VAULT_NAME || 'Vault') + ' --status').toString();
-    res.json({ status });
+    const result = spawnSync('ob', ['sync', '--vault-name', process.env.VAULT_NAME || 'Vault', '--status'], { encoding: 'utf-8' });
+    res.json({ status: result.stdout || '' });
   } catch (error) {
     res.json({ status: 'error', error: error.message });
   }

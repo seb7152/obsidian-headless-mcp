@@ -7,8 +7,12 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 
 # Configuration
-OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
 API_TOKEN = os.getenv("API_TOKEN", "")
+if not API_TOKEN:
+    raise RuntimeError("API_TOKEN environment variable must be set")
+
+OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
+OBSIDIAN_BASE_URL = OBSIDIAN_API_URL.removesuffix("/api")
 PORT = int(os.getenv("PORT", 3001))
 
 # Shared HTTP client — injects Bearer token on every request to the REST API
@@ -27,7 +31,7 @@ class URLTokenAuthMiddleware:
     """Validate the API token embedded in the URL path prefix.
 
     Expected URL format: /{token}/...
-    Claude web MCP URL:  https://mcp.example.com/{API_TOKEN}
+    Claude web MCP URL:  https://mcp.example.com/{API_TOKEN}/mcp
     """
 
     def __init__(self, app, token: str):
@@ -87,7 +91,7 @@ def list_files() -> str:
 def vault_status() -> str:
     """Check vault sync status"""
     try:
-        response = api_client.get(f"{OBSIDIAN_API_URL.replace('/api', '')}/health")
+        response = api_client.get(f"{OBSIDIAN_BASE_URL}/health")
         response.raise_for_status()
         return f"Vault is healthy: {response.json()}"
     except Exception as e:
@@ -135,38 +139,21 @@ def write_file(file_path: str, content: str) -> str:
 
 @mcp.tool()
 def append_to_file(file_path: str, content: str) -> str:
-    """Append content to an existing file
+    """Append content to an existing file (creates it if it doesn't exist)
 
     Args:
         file_path: Path to the file
         content: Content to append
     """
     try:
-        # Read current content
-        read_response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
-        read_response.raise_for_status()
-        current_content = read_response.json().get("content", "")
-
-        # Append and write back
-        new_content = current_content + "\n" + content if current_content else content
-        write_response = api_client.post(
-            f"{OBSIDIAN_API_URL}/file/{file_path}",
-            json={"content": new_content}
+        response = api_client.post(
+            f"{OBSIDIAN_API_URL}/file/{file_path}/append",
+            json={"content": content}
         )
-        write_response.raise_for_status()
+        response.raise_for_status()
         return f"Content appended to {file_path}"
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            # File doesn't exist, create it
-            write_response = api_client.post(
-                f"{OBSIDIAN_API_URL}/file/{file_path}",
-                json={"content": content}
-            )
-            write_response.raise_for_status()
-            return f"File created: {file_path}"
-        return f"Error appending: {e}"
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error appending: {e}"
 
 @mcp.tool()
 def search_vault(query: str) -> str:
@@ -219,9 +206,6 @@ def get_sync_status() -> str:
 if __name__ == "__main__":
     print(f"Starting Obsidian MCP Server on port {PORT}")
     print(f"Connected to Obsidian API at: {OBSIDIAN_API_URL}")
-    if not API_TOKEN:
-        raise RuntimeError("API_TOKEN environment variable must be set")
-
     print(f"Claude web MCP URL: https://<your-domain>/{API_TOKEN}/mcp")
 
     # streamable_http_app() returns a Starlette ASGI app (mcp SDK >= 1.9)
