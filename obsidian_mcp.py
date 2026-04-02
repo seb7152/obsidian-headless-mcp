@@ -172,13 +172,17 @@ class TokenAuthMiddleware:
                     await send({"type": "http.response.body", "body": b"Unauthorized"})
                 await send_401(send)
                 return
+            scope = dict(scope)
             # Strip the token prefix from path
             if API_TOKEN:
                 new_path = path[len(f"/{API_TOKEN}"):] or "/"
-                scope = dict(scope)
                 scope["path"] = new_path
                 raw_path = scope.get("raw_path", path.encode())
                 scope["raw_path"] = raw_path[len(f"/{API_TOKEN}".encode()):] or b"/"
+            # Replace Host header with localhost to bypass FastMCP DNS rebinding protection
+            headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"host"]
+            headers.append((b"host", b"localhost"))
+            scope["headers"] = headers
         await self.app(scope, receive, send)
 
 
