@@ -8,6 +8,7 @@ const { spawnSync } = require('child_process');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const VAULT_PATH = process.env.VAULT_PATH || '/vault';
+const VAULT_PREFIX = VAULT_PATH.endsWith(path.sep) ? VAULT_PATH : VAULT_PATH + path.sep;
 const API_TOKEN = process.env.API_TOKEN || 'change-me-in-production';
 
 app.use(cors());
@@ -115,7 +116,7 @@ app.get(/^\/api\/file\/(.+)$/, (req, res) => {
     const filePath = path.join(VAULT_PATH, req.params[0]);
 
     // Security: prevent directory traversal
-    if (!filePath.startsWith(VAULT_PATH)) {
+    if (!filePath.startsWith(VAULT_PREFIX)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -145,12 +146,15 @@ app.post('/api/files/batch', (req, res) => {
   if (!Array.isArray(paths) || paths.length === 0) {
     return res.status(400).json({ error: '"paths" must be a non-empty array' });
   }
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
 
   const results = paths.map(relativePath => {
     try {
       const filePath = path.join(VAULT_PATH, relativePath);
 
-      if (!filePath.startsWith(VAULT_PATH)) {
+      if (!filePath.startsWith(VAULT_PREFIX)) {
         return { path: relativePath, error: 'Access denied' };
       }
 
@@ -175,7 +179,7 @@ app.post(/^\/api\/file\/(.+)$/, (req, res) => {
     const filePath = path.join(VAULT_PATH, req.params[0]);
 
     // Security: prevent directory traversal
-    if (!filePath.startsWith(VAULT_PATH)) {
+    if (!filePath.startsWith(VAULT_PREFIX)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -201,7 +205,7 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
     const filePath = path.join(VAULT_PATH, req.params[0]);
 
     // Security: prevent directory traversal
-    if (!filePath.startsWith(VAULT_PATH)) {
+    if (!filePath.startsWith(VAULT_PREFIX)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -234,7 +238,7 @@ app.post(/^\/api\/file\/(.+)\/append$/, (req, res) => {
   try {
     const filePath = path.join(VAULT_PATH, req.params[0]);
 
-    if (!filePath.startsWith(VAULT_PATH)) {
+    if (!filePath.startsWith(VAULT_PREFIX)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
