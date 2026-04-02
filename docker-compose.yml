@@ -63,6 +63,28 @@ services:
       - "traefik.http.routers.obsidian-api.tls.certresolver=letsencrypt"
       - "traefik.http.services.obsidian-api.loadbalancer.server.port=3000"
 
+  obsidian-mcp:
+    image: python:3.12-slim
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - obsidian-api
+    volumes:
+      - ./obsidian_mcp.py:/app/obsidian_mcp.py
+    command: bash -c "pip install --quiet mcp httpx uvicorn && python obsidian_mcp.py"
+    expose:
+      - "3001"
+    environment:
+      - OBSIDIAN_API_URL=http://obsidian-api:3000/api
+      - API_TOKEN=${API_TOKEN}
+      - PORT=3001
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.obsidian-mcp.rule=Host(`mcp.${DOMAIN}`)"
+      - "traefik.http.routers.obsidian-mcp.entrypoints=websecure"
+      - "traefik.http.routers.obsidian-mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.services.obsidian-mcp.loadbalancer.server.port=3001"
+
 volumes:
   traefik-letsencrypt:
   obsidian-cache:
