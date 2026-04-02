@@ -120,6 +120,31 @@ def read_file(file_path: str) -> str:
         return f"Error: {e}"
 
 @mcp.tool()
+def read_files_batch(file_paths: list[str]) -> str:
+    """Read multiple markdown files in a single request
+
+    Args:
+        file_paths: List of paths relative to vault root (e.g., ['notes/a.md', 'notes/b.md'])
+    """
+    try:
+        response = api_client.post(
+            f"{OBSIDIAN_API_URL}/files/batch",
+            json={"paths": file_paths}
+        )
+        response.raise_for_status()
+        files = response.json().get("files", [])
+
+        output = []
+        for f in files:
+            if "error" in f:
+                output.append(f"## {f['path']}\nError: {f['error']}")
+            else:
+                output.append(f"## {f['path']}\n{f.get('content', '')}")
+        return "\n\n---\n\n".join(output)
+    except Exception as e:
+        return f"Error fetching batch: {e}"
+
+@mcp.tool()
 def write_file(file_path: str, content: str) -> str:
     """Write or create a markdown file in the vault
 

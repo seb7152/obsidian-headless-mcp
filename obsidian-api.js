@@ -137,6 +137,38 @@ app.get(/^\/api\/file\/(.+)$/, (req, res) => {
   }
 });
 
+// Read multiple files in a single request
+// Body: { paths: ["notes/a.md", "notes/b.md"] }
+app.post('/api/files/batch', (req, res) => {
+  const { paths } = req.body;
+
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  }
+
+  const results = paths.map(relativePath => {
+    try {
+      const filePath = path.join(VAULT_PATH, relativePath);
+
+      if (!filePath.startsWith(VAULT_PATH)) {
+        return { path: relativePath, error: 'Access denied' };
+      }
+
+      if (!fs.existsSync(filePath)) {
+        return { path: relativePath, error: 'File not found' };
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const { frontmatter, body } = parseFrontmatter(content);
+      return { path: relativePath, frontmatter, body, content };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  res.json({ files: results, count: results.length });
+});
+
 // Create or write a complete file
 app.post(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
