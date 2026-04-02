@@ -83,7 +83,7 @@ def list_files() -> str:
         response.raise_for_status()
         data = response.json()
         files = data.get("files", [])
-        return f"Files in vault ({len(files)}):\n" + "\n".join(f"  - {f}" for f in files)
+        return f"Files in vault ({len(files)}):\n" + "\n".join(f"  - {f['path']}" for f in files)
     except Exception as e:
         return f"Error listing files: {e}"
 
