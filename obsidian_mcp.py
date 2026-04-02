@@ -2,14 +2,64 @@
 
 import httpx
 import os
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 
 # Configuration
 OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
+API_TOKEN = os.getenv("API_TOKEN", "change-me-in-production")
 PORT = int(os.getenv("PORT", 3001))
+
+# Shared HTTP client — injects Bearer token on every request to the REST API
+api_client = httpx.Client(
+    headers={"Authorization": f"Bearer {API_TOKEN}"},
+    timeout=30.0
+)
 
 # Create MCP server
 mcp = FastMCP("Obsidian")
+
+
+# ==================== ASGI MIDDLEWARE ====================
+
+class URLTokenAuthMiddleware:
+    """Validate the API token embedded in the URL path prefix.
+
+    Expected URL format: /{token}/...
+    Claude web MCP URL:  https://mcp.example.com/{API_TOKEN}
+    """
+
+    def __init__(self, app, token: str):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            path = scope.get("path", "")
+            parts = path.lstrip("/").split("/", 1)
+            provided_token = parts[0] if parts else ""
+
+            if provided_token != self.token:
+                if scope["type"] == "http":
+                    await send({
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [(b"content-type", b"application/json")],
+                    })
+                    await send({
+                        "type": "http.response.body",
+                        "body": b'{"error":"Unauthorized"}',
+                        "more_body": False,
+                    })
+                return
+
+            # Strip the token prefix from the path before forwarding
+            new_path = "/" + parts[1] if len(parts) > 1 and parts[1] else "/"
+            scope = dict(scope)
+            scope["path"] = new_path
+
+        await self.app(scope, receive, send)
+
 
 # ==================== RESOURCES ====================
 
@@ -17,7 +67,7 @@ mcp = FastMCP("Obsidian")
 def list_files() -> str:
     """List all markdown files in the vault"""
     try:
-        response = httpx.get(f"{OBSIDIAN_API_URL}/files")
+        response = api_client.get(f"{OBSIDIAN_API_URL}/files")
         response.raise_for_status()
         data = response.json()
         files = data.get("files", [])
@@ -29,11 +79,12 @@ def list_files() -> str:
 def vault_status() -> str:
     """Check vault sync status"""
     try:
-        response = httpx.get(f"{OBSIDIAN_API_URL.replace('/api', '')}/health")
+        response = api_client.get(f"{OBSIDIAN_API_URL.replace('/api', '')}/health")
         response.raise_for_status()
         return f"Vault is healthy: {response.json()}"
     except Exception as e:
         return f"Vault error: {e}"
+
 
 # ==================== TOOLS ====================
 
@@ -45,7 +96,7 @@ def read_file(file_path: str) -> str:
         file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
     """
     try:
-        response = httpx.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
         response.raise_for_status()
         data = response.json()
         return data.get("content", "")
@@ -65,7 +116,7 @@ def write_file(file_path: str, content: str) -> str:
         content: The markdown content to write
     """
     try:
-        response = httpx.post(
+        response = api_client.post(
             f"{OBSIDIAN_API_URL}/file/{file_path}",
             json={"content": content}
         )
@@ -84,13 +135,13 @@ def append_to_file(file_path: str, content: str) -> str:
     """
     try:
         # Read current content
-        read_response = httpx.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        read_response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
         read_response.raise_for_status()
         current_content = read_response.json().get("content", "")
 
         # Append and write back
         new_content = current_content + "\n" + content if current_content else content
-        write_response = httpx.post(
+        write_response = api_client.post(
             f"{OBSIDIAN_API_URL}/file/{file_path}",
             json={"content": new_content}
         )
@@ -99,7 +150,7 @@ def append_to_file(file_path: str, content: str) -> str:
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             # File doesn't exist, create it
-            write_response = httpx.post(
+            write_response = api_client.post(
                 f"{OBSIDIAN_API_URL}/file/{file_path}",
                 json={"content": content}
             )
@@ -117,7 +168,7 @@ def search_vault(query: str) -> str:
         query: Text to search for
     """
     try:
-        response = httpx.get(f"{OBSIDIAN_API_URL}/search", params={"q": query})
+        response = api_client.get(f"{OBSIDIAN_API_URL}/search", params={"q": query})
         response.raise_for_status()
         data = response.json()
         results = data.get("results", [])
@@ -137,7 +188,7 @@ def search_vault(query: str) -> str:
 def sync_vault() -> str:
     """Manually trigger a vault sync with Obsidian Sync service"""
     try:
-        response = httpx.post(f"{OBSIDIAN_API_URL}/sync")
+        response = api_client.post(f"{OBSIDIAN_API_URL}/sync")
         response.raise_for_status()
         return "Vault synchronized successfully"
     except Exception as e:
@@ -147,16 +198,22 @@ def sync_vault() -> str:
 def get_sync_status() -> str:
     """Get current sync status of the vault"""
     try:
-        response = httpx.get(f"{OBSIDIAN_API_URL}/sync/status")
+        response = api_client.get(f"{OBSIDIAN_API_URL}/sync/status")
         response.raise_for_status()
         data = response.json()
         return str(data.get("status", "Unknown status"))
     except Exception as e:
         return f"Error getting sync status: {e}"
 
+
 # ==================== RUN ====================
 
 if __name__ == "__main__":
     print(f"Starting Obsidian MCP Server on port {PORT}")
     print(f"Connected to Obsidian API at: {OBSIDIAN_API_URL}")
-    mcp.run_http(host="0.0.0.0", port=PORT)
+    print(f"Claude web MCP URL: https://<your-domain>/{API_TOKEN}")
+
+    mcp_asgi = mcp.http_app()
+    wrapped_app = URLTokenAuthMiddleware(mcp_asgi, API_TOKEN)
+
+    uvicorn.run(wrapped_app, host="0.0.0.0", port=PORT)
