@@ -173,6 +173,33 @@ app.post('/api/files/batch', (req, res) => {
   res.json({ files: results, count: results.length });
 });
 
+// Append content to a file (atomic — no read-modify-write race)
+// MUST come before the generic /api/file/{path} POST route
+app.post(/^\/api\/file\/(.+)\/append$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+
+    if (!filePath.startsWith(VAULT_PREFIX)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const contentToAppend = req.body.content || '';
+    const dir = path.dirname(filePath);
+
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
+    const newContent = existing ? existing + '\n' + contentToAppend : contentToAppend;
+    fs.writeFileSync(filePath, newContent, 'utf-8');
+
+    res.json({ success: true, path: req.params[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create or write a complete file
 app.post(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
@@ -228,32 +255,6 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
       path: req.params[0],
       frontmatter: updatedFrontmatter
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Append content to a file (atomic — no read-modify-write race)
-app.post(/^\/api\/file\/(.+)\/append$/, (req, res) => {
-  try {
-    const filePath = path.join(VAULT_PATH, req.params[0]);
-
-    if (!filePath.startsWith(VAULT_PREFIX)) {
-      return res.status(403).json({ error: 'Access denied' });
-    }
-
-    const contentToAppend = req.body.content || '';
-    const dir = path.dirname(filePath);
-
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
-    const newContent = existing ? existing + '\n' + contentToAppend : contentToAppend;
-    fs.writeFileSync(filePath, newContent, 'utf-8');
-
-    res.json({ success: true, path: req.params[0] });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
