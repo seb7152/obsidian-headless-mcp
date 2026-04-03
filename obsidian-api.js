@@ -59,7 +59,7 @@ function formatContent(frontmatter, body) {
 // List all markdown files with optional filters
 app.get('/api/files', (req, res) => {
   try {
-    const { type, project, path: filterPath } = req.query;
+    const { type, project, path: filterPath, since, before } = req.query;
 
     const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
       .stdout
@@ -90,6 +90,15 @@ app.get('/api/files', (req, res) => {
         if (project && f.frontmatter.project !== project) return false;
         // Filter by path pattern (optional)
         if (filterPath && !f.path.includes(filterPath)) return false;
+        // Filter by since/before date (frontmatter.created or frontmatter.updated)
+        if (since || before) {
+          const dateField = f.frontmatter.created ?? f.frontmatter.updated;
+          if (dateField !== undefined && dateField !== null) {
+            const d = String(dateField);
+            if (since && d < since) return false;
+            if (before && d > before) return false;
+          }
+        }
         return true;
       })
       .sort((a, b) => {
@@ -103,7 +112,7 @@ app.get('/api/files', (req, res) => {
     res.json({
       files: results,
       count: results.length,
-      filters: { type, project, path: filterPath }
+      filters: { type, project, path: filterPath, since, before }
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
