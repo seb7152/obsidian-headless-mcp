@@ -117,6 +117,39 @@ function resolveWikilink(target, { byName, allPaths }) {
   return { exists: false, resolved: null };
 }
 
+// Helper: Levenshtein distance between two strings
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) => Array.from({ length: n + 1 }, (_, j) => i === 0 ? j : j === 0 ? i : 0));
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+// Helper: Find up to maxResults fuzzy-matched note paths for a broken target
+function fuzzySuggest(target, { byName }, maxResults = 3) {
+  const targetLower = target.replace(/\.md$/i, '').toLowerCase();
+  const scored = [];
+
+  for (const [name, paths] of byName) {
+    const isSubstring = name.includes(targetLower) || targetLower.includes(name);
+    const dist = levenshtein(targetLower, name);
+    const similarity = 1 - dist / Math.max(targetLower.length, name.length, 1);
+    const score = isSubstring ? similarity + 0.5 : similarity;
+    if (score > 0.3 || isSubstring) scored.push({ paths, score });
+  }
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxResults)
+    .map(({ paths }) => paths[0]);
+}
+
 // List all markdown files with optional filters
 app.get('/api/files', (req, res) => {
   try {
@@ -181,6 +214,7 @@ app.get('/api/files', (req, res) => {
 });
 
 // List wikilinks in a file with resolution status
+// Optional query: ?suggest=true → for broken links, include up to 3 fuzzy suggestions
 // MUST come before the generic GET /api/file/{path} route
 app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
   try {
@@ -194,15 +228,19 @@ app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
       return res.status(404).json({ error: 'File not found' });
     }
 
+    const suggest = req.query.suggest === 'true';
     const content = fs.readFileSync(filePath, 'utf-8');
     const { body } = parseFrontmatter(content);
     const index = buildNoteIndex();
 
-    const links = parseWikilinks(body).map(({ raw, target }) => ({
-      raw,
-      target,
-      ...resolveWikilink(target, index)
-    }));
+    const links = parseWikilinks(body).map(({ raw, target }) => {
+      const resolution = resolveWikilink(target, index);
+      const link = { raw, target, ...resolution };
+      if (!resolution.exists && suggest) {
+        link.suggestions = fuzzySuggest(target, index);
+      }
+      return link;
+    });
 
     const broken = links.filter(l => !l.exists);
 
@@ -390,52 +428,6 @@ app.get('/api/search', (req, res) => {
     res.json({ query, results, count: results.length });
   } catch (error) {
     res.json({ query, results: [], count: 0 });
-  }
-});
-
-// Verify wikilinks across the entire vault (or filtered by source path prefix)
-// Optional query: ?source=folder/prefix
-app.get('/api/links/verify', (req, res) => {
-  try {
-    const { source } = req.query;
-    const index = buildNoteIndex();
-
-    const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
-      .stdout.split('\n').filter(f => f);
-
-    const brokenLinks = [];
-    let totalLinks = 0;
-
-    for (const filePath of files) {
-      const relativePath = path.relative(VAULT_PATH, filePath);
-
-      if (source && !relativePath.startsWith(source)) continue;
-
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const { body } = parseFrontmatter(content);
-      const rawLinks = parseWikilinks(body);
-
-      totalLinks += rawLinks.length;
-
-      for (const { raw, target } of rawLinks) {
-        const resolution = resolveWikilink(target, index);
-        if (!resolution.exists) {
-          brokenLinks.push({ source: relativePath, target, raw });
-        }
-      }
-    }
-
-    res.json({
-      summary: {
-        total_links: totalLinks,
-        broken: brokenLinks.length,
-        valid: totalLinks - brokenLinks.length
-      },
-      broken_links: brokenLinks,
-      ...(source && { filter: { source } })
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
   }
 });
 
