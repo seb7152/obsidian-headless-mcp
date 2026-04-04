@@ -56,6 +56,67 @@ function formatContent(frontmatter, body) {
   return `---\n${yaml.dump(frontmatter, { defaultFlowLevel: 2 })}---\n${body}`;
 }
 
+// Helper: Parse all [[wikilinks]] from markdown content
+function parseWikilinks(content) {
+  const regex = /\[\[([^\]\n]+)\]\]/g;
+  const links = [];
+  let match;
+  while ((match = regex.exec(content)) !== null) {
+    const raw = match[1];
+    // Strip alias: [[Note|Alias]] → Note
+    const withoutAlias = raw.split('|')[0].trim();
+    // Strip heading anchor: [[Note#Section]] → Note
+    const target = withoutAlias.split('#')[0].trim();
+    if (target) links.push({ raw: match[1], target });
+  }
+  return links;
+}
+
+// Helper: Build an index of all notes in the vault
+function buildNoteIndex() {
+  const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
+    .stdout.split('\n').filter(f => f);
+
+  const byName = new Map();   // baseName (lowercase, no ext) → [relativePath]
+  const allPaths = new Set(); // relative paths lowercase (with .md)
+
+  for (const filePath of files) {
+    const relativePath = path.relative(VAULT_PATH, filePath);
+    allPaths.add(relativePath.toLowerCase());
+    const baseName = path.basename(relativePath, '.md').toLowerCase();
+    if (!byName.has(baseName)) byName.set(baseName, []);
+    byName.get(baseName).push(relativePath);
+  }
+
+  return { byName, allPaths };
+}
+
+// Helper: Resolve a wikilink target using Obsidian's shortest-path strategy
+function resolveWikilink(target, { byName, allPaths }) {
+  const targetNorm = target.replace(/\.md$/i, '');
+  const targetLower = targetNorm.toLowerCase();
+
+  // 1. Exact relative path match (e.g. [[folder/note]] → folder/note.md)
+  if (allPaths.has(targetLower + '.md')) {
+    const baseName = path.basename(targetLower);
+    const exact = (byName.get(baseName) || []).find(p => p.toLowerCase() === targetLower + '.md');
+    return { exists: true, resolved: exact || null };
+  }
+
+  // 2. Name-only match (Obsidian shortest-path resolution)
+  const baseName = path.basename(targetLower);
+  if (byName.has(baseName)) {
+    const matches = byName.get(baseName);
+    return {
+      exists: true,
+      resolved: matches[0],
+      ...(matches.length > 1 && { ambiguous: matches })
+    };
+  }
+
+  return { exists: false, resolved: null };
+}
+
 // List all markdown files with optional filters
 app.get('/api/files', (req, res) => {
   try {
@@ -113,6 +174,43 @@ app.get('/api/files', (req, res) => {
       files: results,
       count: results.length,
       filters: { type, project, path: filterPath, since, before }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// List wikilinks in a file with resolution status
+// MUST come before the generic GET /api/file/{path} route
+app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+
+    if (!filePath.startsWith(VAULT_PREFIX)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const { body } = parseFrontmatter(content);
+    const index = buildNoteIndex();
+
+    const links = parseWikilinks(body).map(({ raw, target }) => ({
+      raw,
+      target,
+      ...resolveWikilink(target, index)
+    }));
+
+    const broken = links.filter(l => !l.exists);
+
+    res.json({
+      path: req.params[0],
+      links,
+      count: links.length,
+      broken_count: broken.length
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -292,6 +390,52 @@ app.get('/api/search', (req, res) => {
     res.json({ query, results, count: results.length });
   } catch (error) {
     res.json({ query, results: [], count: 0 });
+  }
+});
+
+// Verify wikilinks across the entire vault (or filtered by source path prefix)
+// Optional query: ?source=folder/prefix
+app.get('/api/links/verify', (req, res) => {
+  try {
+    const { source } = req.query;
+    const index = buildNoteIndex();
+
+    const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
+      .stdout.split('\n').filter(f => f);
+
+    const brokenLinks = [];
+    let totalLinks = 0;
+
+    for (const filePath of files) {
+      const relativePath = path.relative(VAULT_PATH, filePath);
+
+      if (source && !relativePath.startsWith(source)) continue;
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const { body } = parseFrontmatter(content);
+      const rawLinks = parseWikilinks(body);
+
+      totalLinks += rawLinks.length;
+
+      for (const { raw, target } of rawLinks) {
+        const resolution = resolveWikilink(target, index);
+        if (!resolution.exists) {
+          brokenLinks.push({ source: relativePath, target, raw });
+        }
+      }
+    }
+
+    res.json({
+      summary: {
+        total_links: totalLinks,
+        broken: brokenLinks.length,
+        valid: totalLinks - brokenLinks.length
+      },
+      broken_links: brokenLinks,
+      ...(source && { filter: { source } })
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
