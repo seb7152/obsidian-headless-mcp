@@ -213,8 +213,8 @@ app.get('/api/files', (req, res) => {
   }
 });
 
-// List wikilinks in a file with resolution status
-// Optional query: ?suggest=true → for broken links, include up to 3 fuzzy suggestions
+// List wikilinks in a file — only returns broken links to keep response compact
+// Optional query: ?suggest=true → include up to 3 fuzzy suggestions per broken link
 // MUST come before the generic GET /api/file/{path} route
 app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
   try {
@@ -233,23 +233,25 @@ app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
     const { body } = parseFrontmatter(content);
     const index = buildNoteIndex();
 
-    const links = parseWikilinks(body).map(({ raw, target }) => {
-      const resolution = resolveWikilink(target, index);
-      const link = { raw, target, ...resolution };
-      if (!resolution.exists && suggest) {
-        link.suggestions = fuzzySuggest(target, index);
+    const allLinks = parseWikilinks(body);
+    const brokenLinks = allLinks.reduce((acc, { raw, target }) => {
+      const { exists } = resolveWikilink(target, index);
+      if (!exists) {
+        const entry = { raw, target };
+        if (suggest) entry.suggestions = fuzzySuggest(target, index);
+        acc.push(entry);
       }
-      return link;
-    });
+      return acc;
+    }, []);
 
-    const broken = links.filter(l => !l.exists);
-
-    res.json({
+    const response = {
       path: req.params[0],
-      links,
-      count: links.length,
-      broken_count: broken.length
-    });
+      count: allLinks.length,
+      broken_count: brokenLinks.length
+    };
+    if (brokenLinks.length > 0) response.broken_links = brokenLinks;
+
+    res.json(response);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
