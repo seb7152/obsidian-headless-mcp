@@ -199,7 +199,15 @@ app.get('/api/files', (req, res) => {
               source = 'filename';
             }
           }
-          const d = dateField ? String(dateField) : 'NO_DATE';
+          // Convert Date objects to ISO YYYY-MM-DD format for comparison
+          let d = 'NO_DATE';
+          if (dateField) {
+            if (dateField instanceof Date) {
+              d = dateField.toISOString().split('T')[0];
+            } else {
+              d = String(dateField).match(/^\d{4}-\d{2}-\d{2}/)?.[0] || String(dateField);
+            }
+          }
           const shouldFilter = dateField && ((since && d < since) || (before && d > before));
           console.log(`[FILTER_DETAIL] ${f.path} => date: ${d} (${source}) => ${shouldFilter ? 'EXCLUDED' : 'INCLUDED'}`);
           if (shouldFilter) {
