@@ -154,6 +154,9 @@ function fuzzySuggest(target, { byName }, maxResults = 3) {
 app.get('/api/files', (req, res) => {
   try {
     const { type, project, path: filterPath, since, before } = req.query;
+    if (since || before) {
+      console.log(`[FILTER] Filtering files - since: ${since}, before: ${before}`);
+    }
 
     const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
       .stdout
@@ -187,15 +190,22 @@ app.get('/api/files', (req, res) => {
         // Filter by since/before date (frontmatter.created, fallback to filename date)
         if (since || before) {
           let dateField = f.frontmatter.created;
+          let source = 'frontmatter.created';
           // Fallback: try to parse date from filename (YYYY-MM-DD - ...)
           if (!dateField) {
             const dateMatch = f.path.match(/^(\d{4}-\d{2}-\d{2})/);
-            if (dateMatch) dateField = dateMatch[1];
+            if (dateMatch) {
+              dateField = dateMatch[1];
+              source = 'filename';
+            }
           }
           if (dateField !== undefined && dateField !== null) {
             const d = String(dateField);
-            if (since && d < since) return false;
-            if (before && d > before) return false;
+            const shouldFilter = (since && d < since) || (before && d > before);
+            if (shouldFilter) {
+              console.log(`[FILTER_DEBUG] Excluded: ${f.path} (date: ${d} from ${source})`);
+              return false;
+            }
           }
         }
         return true;
