@@ -56,6 +56,33 @@ function formatContent(frontmatter, body) {
   return `---\n${yaml.dump(frontmatter, { defaultFlowLevel: 2 })}---\n${body}`;
 }
 
+// Helper: Normalize date to YYYY-MM-DD format (handles Date objects and strings)
+function normalizeDate(dateValue) {
+  if (!dateValue) return null;
+
+  // If it's a Date object
+  if (dateValue instanceof Date) {
+    return dateValue.toISOString().split('T')[0];
+  }
+
+  const str = String(dateValue).trim();
+
+  // If it's already ISO format YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+    return str.substring(0, 10);
+  }
+
+  // Try to parse as date string (e.g., "Wed Mar 25 2026 00:00:00...")
+  try {
+    const parsed = new Date(str);
+    if (!isNaN(parsed.getTime())) {
+      return parsed.toISOString().split('T')[0];
+    }
+  } catch {}
+
+  return null;
+}
+
 // Helper: Parse all [[wikilinks]] from markdown content
 function parseWikilinks(content) {
   const regex = /\[\[([^\]\n]+)\]\]/g;
@@ -199,16 +226,9 @@ app.get('/api/files', (req, res) => {
               source = 'filename';
             }
           }
-          // Convert Date objects to ISO YYYY-MM-DD format for comparison
-          let d = 'NO_DATE';
-          if (dateField) {
-            if (dateField instanceof Date) {
-              d = dateField.toISOString().split('T')[0];
-            } else {
-              d = String(dateField).match(/^\d{4}-\d{2}-\d{2}/)?.[0] || String(dateField);
-            }
-          }
-          const shouldFilter = dateField && ((since && d < since) || (before && d > before));
+          // Normalize to YYYY-MM-DD format (handles Date objects, ISO strings, and text dates)
+          const d = normalizeDate(dateField) || 'NO_DATE';
+          const shouldFilter = d !== 'NO_DATE' && ((since && d < since) || (before && d > before));
           console.log(`[FILTER_DETAIL] ${f.path} => date: ${d} (${source}) => ${shouldFilter ? 'EXCLUDED' : 'INCLUDED'}`);
           if (shouldFilter) {
             return false;
