@@ -199,13 +199,11 @@ app.get('/api/files', (req, res) => {
               source = 'filename';
             }
           }
-          if (dateField !== undefined && dateField !== null) {
-            const d = String(dateField);
-            const shouldFilter = (since && d < since) || (before && d > before);
-            if (shouldFilter) {
-              console.log(`[FILTER_DEBUG] Excluded: ${f.path} (date: ${d} from ${source})`);
-              return false;
-            }
+          const d = dateField ? String(dateField) : 'NO_DATE';
+          const shouldFilter = dateField && ((since && d < since) || (before && d > before));
+          console.log(`[FILTER_DETAIL] ${f.path} => date: ${d} (${source}) => ${shouldFilter ? 'EXCLUDED' : 'INCLUDED'}`);
+          if (shouldFilter) {
+            return false;
           }
         }
         return true;
