@@ -184,9 +184,14 @@ app.get('/api/files', (req, res) => {
         if (project && f.frontmatter.project !== project) return false;
         // Filter by path pattern (optional)
         if (filterPath && !f.path.includes(filterPath)) return false;
-        // Filter by since/before date (frontmatter.created or frontmatter.updated)
+        // Filter by since/before date (frontmatter.created, fallback to filename date)
         if (since || before) {
-          const dateField = f.frontmatter.created ?? f.frontmatter.updated;
+          let dateField = f.frontmatter.created;
+          // Fallback: try to parse date from filename (YYYY-MM-DD - ...)
+          if (!dateField) {
+            const dateMatch = f.path.match(/^(\d{4}-\d{2}-\d{2})/);
+            if (dateMatch) dateField = dateMatch[1];
+          }
           if (dateField !== undefined && dateField !== null) {
             const d = String(dateField);
             if (since && d < since) return false;
