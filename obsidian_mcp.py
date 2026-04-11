@@ -116,14 +116,28 @@ def append_to_file(file_path: str, content: str) -> str:
         return f"Error: {e}"
 
 @mcp.tool()
-def search_vault(query: str) -> str:
-    """Search for text in the vault
+def search_vault(query: str, fuzzy: bool = False, since: str = "", before: str = "") -> str:
+    """Search for notes in the vault by keyword, with optional fuzzy matching and date filters.
+
+    Regular search is case-insensitive and matches note content.
+    Fuzzy search additionally scores notes by title similarity.
 
     Args:
-        query: Text to search for
+        query: Text or keyword to search for
+        fuzzy: Enable fuzzy matching on note titles in addition to content (default: False)
+        since: Only return notes created on or after this date, format YYYY-MM-DD (optional)
+        before: Only return notes created on or before this date, format YYYY-MM-DD (optional)
     """
     try:
-        response = api_client.get(f"{OBSIDIAN_API_URL}/search", params={"q": query})
+        params: dict = {"q": query}
+        if fuzzy:
+            params["fuzzy"] = "true"
+        if since:
+            params["since"] = since
+        if before:
+            params["before"] = before
+
+        response = api_client.get(f"{OBSIDIAN_API_URL}/search", params=params)
         response.raise_for_status()
         data = response.json()
         results = data.get("results", [])
@@ -131,13 +145,98 @@ def search_vault(query: str) -> str:
         if not results:
             return f"No results found for: {query}"
 
-        output = f"Found {len(results)} results for '{query}':\n"
-        for result in results[:20]:  # Limit to 20 results
-            output += f"\n  {result['file']}\n"
-            output += f"    {result['match']}\n"
+        header = f"Found {len(results)} results for '{query}'"
+        if fuzzy:
+            header += " (fuzzy)"
+        date_parts = []
+        if since:
+            date_parts.append(f"since {since}")
+        if before:
+            date_parts.append(f"before {before}")
+        if date_parts:
+            header += f" [{', '.join(date_parts)}]"
+        output = header + ":\n"
+
+        for result in results[:20]:
+            line = f"\n  {result['file']}"
+            if result.get("title") and result["title"] != result["file"].rsplit("/", 1)[-1].replace(".md", ""):
+                line += f" — {result['title']}"
+            if result.get("date"):
+                line += f" [{result['date']}]"
+            if result.get("score") is not None:
+                line += f" (score: {result['score']})"
+            output += line + "\n"
+            for match in result.get("matches", []):
+                if match:
+                    output += f"    > {match}\n"
+
         return output
     except Exception as e:
         return f"Error searching: {e}"
+
+
+@mcp.tool()
+def list_directory(dir_path: str = "") -> str:
+    """List the contents of a directory in the vault (files and subdirectories).
+
+    Args:
+        dir_path: Path to the directory relative to vault root (e.g., '10_Inbox' or '20_Projects/MyProject').
+                  Leave empty to list the vault root.
+    """
+    try:
+        endpoint = f"{OBSIDIAN_API_URL}/directory"
+        if dir_path:
+            endpoint = f"{endpoint}/{dir_path}"
+
+        response = api_client.get(endpoint)
+        response.raise_for_status()
+        data = response.json()
+        entries = data.get("entries", [])
+
+        dirs = [e for e in entries if e["type"] == "directory"]
+        files = [e for e in entries if e["type"] == "file"]
+
+        output = f"Contents of '{data.get('path', '/')}' ({data.get('count', 0)} entries):\n"
+        if dirs:
+            output += "\nDirectories:\n"
+            for d in dirs:
+                output += f"  {d['name']}/\n"
+        if files:
+            output += "\nFiles:\n"
+            for f in files:
+                output += f"  {f['name']}\n"
+        if not dirs and not files:
+            output += "  (empty)\n"
+        return output
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"Directory not found: {dir_path or '/'}"
+        return f"Error listing directory: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def get_projects() -> str:
+    """Get all project folders from the 20_Projects directory, with their vault path.
+
+    Returns a list of project names and their paths relative to the vault root.
+    """
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/projects")
+        response.raise_for_status()
+        data = response.json()
+        projects = data.get("projects", [])
+
+        if not projects:
+            return "No projects found in 20_Projects/"
+
+        output = f"Projects ({len(projects)}):\n"
+        for p in projects:
+            output += f"\n  {p['name']}\n    Path: {p['path']}\n"
+        return output
+    except Exception as e:
+        return f"Error getting projects: {e}"
 
 @mcp.tool()
 def sync_vault() -> str:

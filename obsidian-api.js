@@ -439,29 +439,190 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
   }
 });
 
-// Search in vault
-app.get('/api/search', (req, res) => {
-  const query = req.query.q;
+// List directory contents
+app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
   try {
-    if (!query) {
-      return res.status(400).json({ error: 'Query parameter (q) required' });
+    const relPath = req.params[0] || '';
+    const dirPath = relPath ? path.join(VAULT_PATH, relPath) : VAULT_PATH;
+
+    if (dirPath !== VAULT_PATH && !dirPath.startsWith(VAULT_PREFIX)) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
-    const grep = spawnSync('grep', ['-r', query, '--include=*.md', VAULT_PATH], { encoding: 'utf-8' });
-    const results = (grep.stdout || '')
-      .split('\n')
-      .filter(line => line)
-      .map(line => {
-        const [filePath, ...content] = line.split(':');
-        return {
-          file: path.relative(VAULT_PATH, filePath),
-          match: content.join(':')
-        };
+    if (!fs.existsSync(dirPath)) {
+      return res.status(404).json({ error: 'Directory not found' });
+    }
+
+    const stat = fs.statSync(dirPath);
+    if (!stat.isDirectory()) {
+      return res.status(400).json({ error: 'Path is not a directory' });
+    }
+
+    const entries = fs.readdirSync(dirPath)
+      .map(name => {
+        const fullPath = path.join(dirPath, name);
+        try {
+          const s = fs.statSync(fullPath);
+          return {
+            name,
+            path: path.relative(VAULT_PATH, fullPath),
+            type: s.isDirectory() ? 'directory' : 'file'
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(e => e)
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+        return a.name.localeCompare(b.name);
       });
 
-    res.json({ query, results, count: results.length });
+    res.json({ path: relPath || '/', entries, count: entries.length });
   } catch (error) {
-    res.json({ query, results: [], count: 0 });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Search in vault — supports keyword (default) and fuzzy modes with optional date filters
+// Query params: q (required), fuzzy=true, since=YYYY-MM-DD, before=YYYY-MM-DD
+app.get('/api/search', (req, res) => {
+  const query = req.query.q;
+  const fuzzy = req.query.fuzzy === 'true';
+  const since = req.query.since;
+  const before = req.query.before;
+
+  if (!query) {
+    return res.status(400).json({ error: 'Query parameter (q) required' });
+  }
+
+  try {
+    let results = [];
+
+    if (fuzzy) {
+      // Fuzzy: score files by title similarity + case-insensitive content presence
+      const allFiles = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
+        .stdout.split('\n').filter(f => f);
+
+      const queryLower = query.toLowerCase();
+
+      for (const filePath of allFiles) {
+        try {
+          const relativePath = path.relative(VAULT_PATH, filePath);
+          const baseName = path.basename(relativePath, '.md');
+          const baseNameLower = baseName.toLowerCase();
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const { frontmatter, body } = parseFrontmatter(content);
+
+          // Title fuzzy score
+          const isSubstring = baseNameLower.includes(queryLower) || queryLower.includes(baseNameLower);
+          const dist = levenshtein(queryLower, baseNameLower);
+          const similarity = 1 - dist / Math.max(queryLower.length, baseNameLower.length, 1);
+          let score = isSubstring ? similarity + 0.5 : similarity;
+
+          // Content keyword bonus
+          const bodyLower = body.toLowerCase();
+          const contentHit = bodyLower.includes(queryLower);
+          if (contentHit) score += 0.3;
+
+          if (score <= 0.4 && !contentHit) continue;
+
+          // Date filtering
+          let dateField = frontmatter.created;
+          if (!dateField) {
+            const dateMatch = path.basename(relativePath).match(/^(\d{4}-\d{2}-\d{2})/);
+            if (dateMatch) dateField = dateMatch[1];
+          }
+          const d = normalizeDate(dateField);
+          if (d && since && d < since) continue;
+          if (d && before && d > before) continue;
+
+          const matches = body.split('\n')
+            .filter(line => line.toLowerCase().includes(queryLower))
+            .map(line => line.trim())
+            .filter(line => line)
+            .slice(0, 3);
+
+          results.push({
+            file: relativePath,
+            title: frontmatter.title || baseName,
+            score: Math.round(score * 100) / 100,
+            matches,
+            date: d || null
+          });
+        } catch {}
+      }
+
+      results.sort((a, b) => b.score - a.score);
+    } else {
+      // Keyword: case-insensitive grep to find matching files, then apply date filter
+      const grep = spawnSync('grep', ['-r', '-i', '-l', query, '--include=*.md', VAULT_PATH], { encoding: 'utf-8' });
+      const matchedFiles = (grep.stdout || '').split('\n').filter(f => f);
+
+      for (const filePath of matchedFiles) {
+        try {
+          const relativePath = path.relative(VAULT_PATH, filePath);
+          const content = fs.readFileSync(filePath, 'utf-8');
+          const { frontmatter, body } = parseFrontmatter(content);
+
+          // Date filtering
+          let dateField = frontmatter.created;
+          if (!dateField) {
+            const dateMatch = path.basename(relativePath).match(/^(\d{4}-\d{2}-\d{2})/);
+            if (dateMatch) dateField = dateMatch[1];
+          }
+          const d = normalizeDate(dateField);
+          if (d && since && d < since) continue;
+          if (d && before && d > before) continue;
+
+          const matches = body.split('\n')
+            .filter(line => line.toLowerCase().includes(query.toLowerCase()))
+            .map(line => line.trim())
+            .filter(line => line)
+            .slice(0, 3);
+
+          results.push({
+            file: relativePath,
+            title: frontmatter.title || path.basename(relativePath, '.md'),
+            matches,
+            date: d || null
+          });
+        } catch {}
+      }
+    }
+
+    res.json({ query, results, count: results.length, fuzzy });
+  } catch (error) {
+    res.json({ query, results: [], count: 0, error: error.message });
+  }
+});
+
+// List all project folders from 20_Projects/
+app.get('/api/projects', (req, res) => {
+  try {
+    const projectsDir = path.join(VAULT_PATH, '20_Projects');
+
+    if (!fs.existsSync(projectsDir)) {
+      return res.json({ projects: [], count: 0 });
+    }
+
+    const projects = fs.readdirSync(projectsDir)
+      .filter(name => {
+        try {
+          return fs.statSync(path.join(projectsDir, name)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+      .map(name => ({
+        name,
+        path: path.join('20_Projects', name)
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    res.json({ projects, count: projects.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
