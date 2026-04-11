@@ -3,13 +3,15 @@
 import httpx
 import os
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 # Configuration
 OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
 PORT = int(os.getenv("PORT", 3001))
 
-# Create MCP server
-mcp = FastMCP("Obsidian")
+# Create MCP server — DNS rebinding protection disabled because token auth is handled
+# by TokenAuthMiddleware (the API token is required in the URL path)
+mcp = FastMCP("Obsidian", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 
 # ==================== RESOURCES ====================
 
