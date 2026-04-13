@@ -302,12 +302,12 @@ def bulk_update_frontmatter(file_paths: list, updates: dict) -> str:
 
 
 @mcp.tool()
-def replace_in_file(file_path: str, old_text: str, new_text: str) -> str:
+def patch_file(file_path: str, old_text: str, new_text: str) -> str:
     """Replace a specific piece of text in a file — surgical edit without touching the rest.
 
     Searches for `old_text` in the file content and replaces the first occurrence
-    with `new_text`. Use this to update a specific section, sentence, or value
-    without rewriting the whole file.
+    with `new_text`. Works on any part of the file (frontmatter or body), at any
+    granularity: a word, a sentence, a whole section.
 
     Returns an error if `old_text` is not found, so you know the edit didn't apply silently.
 
@@ -331,54 +331,11 @@ def replace_in_file(file_path: str, old_text: str, new_text: str) -> str:
             json={"content": new_content}
         )
         write_response.raise_for_status()
-        return f"Replaced in {file_path}"
+        return f"Patched {file_path}"
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"File not found: {file_path}"
         return f"Error: {e}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
-@mcp.tool()
-def patch_file(file_path: str, frontmatter: dict | None = None, body: str | None = None) -> str:
-    """Update a file's frontmatter and/or body independently — no full rewrite needed.
-
-    Frontmatter is merged (existing fields not in `frontmatter` are kept).
-    Body replaces the entire body section — use replace_in_file for targeted edits within the body.
-    At least one of `frontmatter` or `body` must be given.
-
-    Args:
-        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
-        frontmatter: Frontmatter fields to merge into the existing frontmatter (optional)
-        body: New markdown body to replace the existing body entirely (optional)
-    """
-    if frontmatter is None and body is None:
-        return "Error: at least one of 'frontmatter' or 'body' must be provided"
-    try:
-        parts_updated = []
-
-        if frontmatter is not None:
-            fm_response = api_client.patch(
-                f"{OBSIDIAN_API_URL}/file/{file_path}",
-                json=frontmatter
-            )
-            fm_response.raise_for_status()
-            parts_updated.append("frontmatter")
-
-        if body is not None:
-            body_response = api_client.patch(
-                f"{OBSIDIAN_API_URL}/file/{file_path}/body",
-                json={"body": body}
-            )
-            body_response.raise_for_status()
-            parts_updated.append("body")
-
-        return f"File updated ({', '.join(parts_updated)}): {file_path}"
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return f"File not found: {file_path}"
-        return f"Error patching file: {e}"
     except Exception as e:
         return f"Error: {e}"
 
