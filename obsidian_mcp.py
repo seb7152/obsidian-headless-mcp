@@ -268,35 +268,32 @@ def update_frontmatter(file_path: str, updates: dict) -> str:
 
 
 @mcp.tool()
-def bulk_update_frontmatter(updates: list) -> str:
-    """Update frontmatter fields for multiple files in a single operation.
+def bulk_update_frontmatter(file_paths: list, updates: dict) -> str:
+    """Apply the same frontmatter changes to multiple files at once.
 
-    Each entry specifies a file path and the frontmatter fields to merge.
-    Existing fields not mentioned are preserved. Processes up to 100 files at once.
+    Merges `updates` into the frontmatter of every file in `file_paths`.
+    Existing fields not in `updates` are preserved. Processes up to 100 files.
 
     Args:
-        updates: List of dicts, each with:
-            - path (str): File path relative to vault root
-            - frontmatter (dict): Fields to set or update in that file's frontmatter
-          Example: [{"path": "notes/a.md", "frontmatter": {"status": "done"}}, ...]
+        file_paths: List of file paths relative to vault root
+                    (e.g., ["notes/a.md", "notes/b.md"])
+        updates: Frontmatter fields to set on all files
+                 (e.g., {"status": "archive", "reviewed": True})
     """
     try:
         response = api_client.patch(
             f"{OBSIDIAN_API_URL}/files/batch",
-            json={"updates": updates}
+            json={"paths": file_paths, "frontmatter": updates}
         )
         response.raise_for_status()
         data = response.json()
         results = data.get("results", [])
-        failed_count = data.get("failed_count", 0)
         total = data.get("count", 0)
 
         ok = [r for r in results if r.get("success")]
         failed = [r for r in results if r.get("error")]
 
         lines = [f"Bulk frontmatter update: {len(ok)}/{total} succeeded"]
-        for r in ok:
-            lines.append(f"  OK  {r['path']}")
         for r in failed:
             lines.append(f"  FAIL {r['path']}: {r['error']}")
         return "\n".join(lines)
@@ -305,17 +302,56 @@ def bulk_update_frontmatter(updates: list) -> str:
 
 
 @mcp.tool()
+def replace_in_file(file_path: str, old_text: str, new_text: str) -> str:
+    """Replace a specific piece of text in a file — surgical edit without touching the rest.
+
+    Searches for `old_text` in the file content and replaces the first occurrence
+    with `new_text`. Use this to update a specific section, sentence, or value
+    without rewriting the whole file.
+
+    Returns an error if `old_text` is not found, so you know the edit didn't apply silently.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        old_text: Exact text to find (must match precisely, including whitespace)
+        new_text: Text to replace it with
+    """
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response.raise_for_status()
+        content = response.json().get("content", "")
+
+        if old_text not in content:
+            return f"Text not found in {file_path} — no changes made"
+
+        new_content = content.replace(old_text, new_text, 1)
+
+        write_response = api_client.post(
+            f"{OBSIDIAN_API_URL}/file/{file_path}",
+            json={"content": new_content}
+        )
+        write_response.raise_for_status()
+        return f"Replaced in {file_path}"
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"File not found: {file_path}"
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def patch_file(file_path: str, frontmatter: dict | None = None, body: str | None = None) -> str:
     """Update a file's frontmatter and/or body independently — no full rewrite needed.
 
-    Pass only the parts you want to change. Frontmatter is merged (existing fields
-    not in `frontmatter` are kept). Body replaces the entire body section if provided.
+    Frontmatter is merged (existing fields not in `frontmatter` are kept).
+    Body replaces the entire body section — use replace_in_file for targeted edits within the body.
     At least one of `frontmatter` or `body` must be given.
 
     Args:
         file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
         frontmatter: Frontmatter fields to merge into the existing frontmatter (optional)
-        body: New markdown body to replace the existing body (optional)
+        body: New markdown body to replace the existing body entirely (optional)
     """
     if frontmatter is None and body is None:
         return "Error: at least one of 'frontmatter' or 'body' must be provided"

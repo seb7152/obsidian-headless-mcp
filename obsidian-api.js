@@ -468,23 +468,22 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
   }
 });
 
-// Bulk update frontmatter for multiple files (PATCH)
-// Body: { updates: [{ path: "notes/a.md", frontmatter: { key: value } }, ...] }
+// Bulk frontmatter update — apply the same patch to multiple files at once
+// Body: { paths: ["notes/a.md", "notes/b.md"], frontmatter: { status: "done" } }
 app.patch('/api/files/batch', (req, res) => {
-  const { updates } = req.body;
+  const { paths, frontmatter: newFields } = req.body;
 
-  if (!Array.isArray(updates) || updates.length === 0) {
-    return res.status(400).json({ error: '"updates" must be a non-empty array' });
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
   }
-  if (updates.length > 100) {
-    return res.status(400).json({ error: '"updates" must contain at most 100 entries' });
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
+  if (typeof newFields !== 'object' || newFields === null || Array.isArray(newFields)) {
+    return res.status(400).json({ error: '"frontmatter" must be an object' });
   }
 
-  const results = updates.map(({ path: relativePath, frontmatter: newFields }) => {
-    if (!relativePath || typeof newFields !== 'object' || newFields === null) {
-      return { path: relativePath, error: 'Each entry must have "path" and "frontmatter" fields' };
-    }
-
+  const results = paths.map(relativePath => {
     try {
       const filePath = path.join(VAULT_PATH, relativePath);
 
@@ -501,7 +500,7 @@ app.patch('/api/files/batch', (req, res) => {
       const updatedFrontmatter = { ...frontmatter, ...newFields };
       fs.writeFileSync(filePath, formatContent(updatedFrontmatter, body), 'utf-8');
 
-      return { path: relativePath, success: true, frontmatter: updatedFrontmatter };
+      return { path: relativePath, success: true };
     } catch (err) {
       return { path: relativePath, error: err.message };
     }
