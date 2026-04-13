@@ -239,6 +239,108 @@ def get_projects() -> str:
         return f"Error getting projects: {e}"
 
 @mcp.tool()
+def update_frontmatter(file_path: str, updates: dict) -> str:
+    """Update specific frontmatter fields of a file without touching the body.
+
+    Merges the provided fields into the existing frontmatter — existing fields not
+    mentioned in `updates` are preserved. To delete a field, set its value to null.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        updates: Dictionary of frontmatter fields to set or update (e.g., {"status": "done", "tags": ["a", "b"]})
+    """
+    try:
+        response = api_client.patch(
+            f"{OBSIDIAN_API_URL}/file/{file_path}",
+            json=updates
+        )
+        response.raise_for_status()
+        data = response.json()
+        fm = data.get("frontmatter", {})
+        fields = ", ".join(f"{k}={v!r}" for k, v in fm.items())
+        return f"Frontmatter updated for {file_path}: {fields}"
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"File not found: {file_path}"
+        return f"Error updating frontmatter: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def bulk_update_frontmatter(file_paths: list, updates: dict) -> str:
+    """Apply the same frontmatter changes to multiple files at once.
+
+    Merges `updates` into the frontmatter of every file in `file_paths`.
+    Existing fields not in `updates` are preserved. Processes up to 100 files.
+
+    Args:
+        file_paths: List of file paths relative to vault root
+                    (e.g., ["notes/a.md", "notes/b.md"])
+        updates: Frontmatter fields to set on all files
+                 (e.g., {"status": "archive", "reviewed": True})
+    """
+    try:
+        response = api_client.patch(
+            f"{OBSIDIAN_API_URL}/files/batch",
+            json={"paths": file_paths, "frontmatter": updates}
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        total = data.get("count", 0)
+
+        ok = [r for r in results if r.get("success")]
+        failed = [r for r in results if r.get("error")]
+
+        lines = [f"Bulk frontmatter update: {len(ok)}/{total} succeeded"]
+        for r in failed:
+            lines.append(f"  FAIL {r['path']}: {r['error']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def patch_file(file_path: str, old_text: str, new_text: str) -> str:
+    """Replace a specific piece of text in a file — surgical edit without touching the rest.
+
+    Searches for `old_text` in the file content and replaces the first occurrence
+    with `new_text`. Works on any part of the file (frontmatter or body), at any
+    granularity: a word, a sentence, a whole section.
+
+    Returns an error if `old_text` is not found, so you know the edit didn't apply silently.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        old_text: Exact text to find (must match precisely, including whitespace)
+        new_text: Text to replace it with
+    """
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response.raise_for_status()
+        content = response.json().get("content", "")
+
+        if old_text not in content:
+            return f"Text not found in {file_path} — no changes made"
+
+        new_content = content.replace(old_text, new_text, 1)
+
+        write_response = api_client.post(
+            f"{OBSIDIAN_API_URL}/file/{file_path}",
+            json={"content": new_content}
+        )
+        write_response.raise_for_status()
+        return f"Patched {file_path}"
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"File not found: {file_path}"
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def sync_vault() -> str:
     """Manually trigger a vault sync with Obsidian Sync service"""
     try:

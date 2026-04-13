@@ -405,6 +405,35 @@ app.post(/^\/api\/file\/(.+)$/, (req, res) => {
   }
 });
 
+// Update body only — preserves frontmatter exactly as-is (PATCH)
+// MUST come before the generic PATCH /api/file/{path} route
+app.patch(/^\/api\/file\/(.+)\/body$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+
+    if (!filePath.startsWith(VAULT_PREFIX)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const newBody = req.body.body ?? '';
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const { frontmatter } = parseFrontmatter(content);
+
+    const newContent = Object.keys(frontmatter).length > 0
+      ? formatContent(frontmatter, newBody)
+      : newBody;
+
+    fs.writeFileSync(filePath, newContent, 'utf-8');
+    res.json({ success: true, path: req.params[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Update frontmatter only (PATCH)
 app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
@@ -437,6 +466,48 @@ app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// Bulk frontmatter update — apply the same patch to multiple files at once
+// Body: { paths: ["notes/a.md", "notes/b.md"], frontmatter: { status: "done" } }
+app.patch('/api/files/batch', (req, res) => {
+  const { paths, frontmatter: newFields } = req.body;
+
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  }
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
+  if (typeof newFields !== 'object' || newFields === null || Array.isArray(newFields)) {
+    return res.status(400).json({ error: '"frontmatter" must be an object' });
+  }
+
+  const results = paths.map(relativePath => {
+    try {
+      const filePath = path.join(VAULT_PATH, relativePath);
+
+      if (!filePath.startsWith(VAULT_PREFIX)) {
+        return { path: relativePath, error: 'Access denied' };
+      }
+
+      if (!fs.existsSync(filePath)) {
+        return { path: relativePath, error: 'File not found' };
+      }
+
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const { frontmatter, body } = parseFrontmatter(content);
+      const updatedFrontmatter = { ...frontmatter, ...newFields };
+      fs.writeFileSync(filePath, formatContent(updatedFrontmatter, body), 'utf-8');
+
+      return { path: relativePath, success: true };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
 });
 
 // List directory contents
