@@ -239,6 +239,115 @@ def get_projects() -> str:
         return f"Error getting projects: {e}"
 
 @mcp.tool()
+def update_frontmatter(file_path: str, updates: dict) -> str:
+    """Update specific frontmatter fields of a file without touching the body.
+
+    Merges the provided fields into the existing frontmatter — existing fields not
+    mentioned in `updates` are preserved. To delete a field, set its value to null.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        updates: Dictionary of frontmatter fields to set or update (e.g., {"status": "done", "tags": ["a", "b"]})
+    """
+    try:
+        response = api_client.patch(
+            f"{OBSIDIAN_API_URL}/file/{file_path}",
+            json=updates
+        )
+        response.raise_for_status()
+        data = response.json()
+        fm = data.get("frontmatter", {})
+        fields = ", ".join(f"{k}={v!r}" for k, v in fm.items())
+        return f"Frontmatter updated for {file_path}: {fields}"
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"File not found: {file_path}"
+        return f"Error updating frontmatter: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def bulk_update_frontmatter(updates: list) -> str:
+    """Update frontmatter fields for multiple files in a single operation.
+
+    Each entry specifies a file path and the frontmatter fields to merge.
+    Existing fields not mentioned are preserved. Processes up to 100 files at once.
+
+    Args:
+        updates: List of dicts, each with:
+            - path (str): File path relative to vault root
+            - frontmatter (dict): Fields to set or update in that file's frontmatter
+          Example: [{"path": "notes/a.md", "frontmatter": {"status": "done"}}, ...]
+    """
+    try:
+        response = api_client.patch(
+            f"{OBSIDIAN_API_URL}/files/batch",
+            json={"updates": updates}
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        failed_count = data.get("failed_count", 0)
+        total = data.get("count", 0)
+
+        ok = [r for r in results if r.get("success")]
+        failed = [r for r in results if r.get("error")]
+
+        lines = [f"Bulk frontmatter update: {len(ok)}/{total} succeeded"]
+        for r in ok:
+            lines.append(f"  OK  {r['path']}")
+        for r in failed:
+            lines.append(f"  FAIL {r['path']}: {r['error']}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def patch_file(file_path: str, frontmatter: dict | None = None, body: str | None = None) -> str:
+    """Update a file's frontmatter and/or body independently — no full rewrite needed.
+
+    Pass only the parts you want to change. Frontmatter is merged (existing fields
+    not in `frontmatter` are kept). Body replaces the entire body section if provided.
+    At least one of `frontmatter` or `body` must be given.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        frontmatter: Frontmatter fields to merge into the existing frontmatter (optional)
+        body: New markdown body to replace the existing body (optional)
+    """
+    if frontmatter is None and body is None:
+        return "Error: at least one of 'frontmatter' or 'body' must be provided"
+    try:
+        parts_updated = []
+
+        if frontmatter is not None:
+            fm_response = api_client.patch(
+                f"{OBSIDIAN_API_URL}/file/{file_path}",
+                json=frontmatter
+            )
+            fm_response.raise_for_status()
+            parts_updated.append("frontmatter")
+
+        if body is not None:
+            body_response = api_client.patch(
+                f"{OBSIDIAN_API_URL}/file/{file_path}/body",
+                json={"body": body}
+            )
+            body_response.raise_for_status()
+            parts_updated.append("body")
+
+        return f"File updated ({', '.join(parts_updated)}): {file_path}"
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"File not found: {file_path}"
+        return f"Error patching file: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def sync_vault() -> str:
     """Manually trigger a vault sync with Obsidian Sync service"""
     try:
