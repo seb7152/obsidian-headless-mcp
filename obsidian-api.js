@@ -434,6 +434,66 @@ app.patch(/^\/api\/file\/(.+)\/body$/, (req, res) => {
   }
 });
 
+// Move a single file
+// Body: { "destination": "new/path/to/file.md" }
+app.post(/^\/api\/file\/(.+)\/move$/, (req, res) => {
+  try {
+    const srcPath = path.join(VAULT_PATH, req.params[0]);
+    if (!srcPath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied' });
+    if (!fs.existsSync(srcPath)) return res.status(404).json({ error: 'File not found' });
+
+    const { destination } = req.body;
+    if (!destination) return res.status(400).json({ error: '"destination" is required' });
+
+    const destPath = path.join(VAULT_PATH, destination);
+    if (!destPath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied: destination' });
+
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.renameSync(srcPath, destPath);
+
+    res.json({ success: true, from: req.params[0], to: destination });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Bulk move files to a destination folder
+// Body: { "paths": ["a.md", "b.md"], "destination_folder": "30_Knowledge/permanent-notes" }
+app.post('/api/files/move', (req, res) => {
+  const { paths, destination_folder } = req.body;
+
+  if (!Array.isArray(paths) || paths.length === 0)
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  if (paths.length > 100)
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  if (!destination_folder)
+    return res.status(400).json({ error: '"destination_folder" is required' });
+
+  const destDir = path.join(VAULT_PATH, destination_folder);
+  if (!destDir.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied: destination_folder' });
+
+  fs.mkdirSync(destDir, { recursive: true });
+
+  const results = paths.map(relativePath => {
+    try {
+      const srcPath = path.join(VAULT_PATH, relativePath);
+      if (!srcPath.startsWith(VAULT_PREFIX)) return { path: relativePath, error: 'Access denied' };
+      if (!fs.existsSync(srcPath)) return { path: relativePath, error: 'File not found' };
+
+      const fileName = path.basename(relativePath);
+      const destPath = path.join(destDir, fileName);
+      fs.renameSync(srcPath, destPath);
+
+      return { path: relativePath, success: true, to: path.join(destination_folder, fileName) };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
 // Update frontmatter only (PATCH)
 app.patch(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
