@@ -341,6 +341,136 @@ def patch_file(file_path: str, old_text: str, new_text: str) -> str:
 
 
 @mcp.tool()
+def query_vault(sql: str) -> str:
+    """Execute a SQL SELECT query against the vault index.
+
+    The index has two tables:
+      - files: path, title, created, modified, tags (JSON array), frontmatter (JSON object)
+      - tasks: file_path, text, completed (0=open / 1=done), due (YYYY-MM-DD or null)
+
+    Useful JSON operators: json_extract(frontmatter, '$.status'), tags LIKE '%"active"%'
+
+    Only SELECT statements are allowed.
+
+    Args:
+        sql: SQL SELECT statement to run against the vault index
+    """
+    try:
+        response = api_client.post(f"{OBSIDIAN_API_URL}/query", json={"sql": sql})
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+
+        if not results:
+            return "No results"
+
+        headers = list(results[0].keys())
+        rows = [[str(r.get(h) if r.get(h) is not None else "") for h in headers] for r in results]
+        col_widths = [max(len(h), max((len(r[i]) for r in rows), default=0)) for i, h in enumerate(headers)]
+
+        header_line = " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
+        separator   = "-+-".join("-" * w for w in col_widths)
+        row_lines   = [" | ".join(r[i].ljust(col_widths[i]) for i in range(len(headers))) for r in rows]
+
+        return f"{len(results)} result(s):\n\n{header_line}\n{separator}\n" + "\n".join(row_lines)
+    except httpx.HTTPStatusError as e:
+        return f"Query error: {e.response.text}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def run_index(file_path: str, section: str = "") -> str:
+    """List or execute SQL queries embedded in an _index.md file.
+
+    _index.md files pair Dataview blocks (rendered in Obsidian) with ```sql blocks
+    (executable by agents). Sections are identified by their nearest preceding heading.
+
+    - Without `section`: lists all available sections and their status (SQL ready / Dataview only).
+    - With `section`: executes the SQL for that section, or shows the Dataview query if no SQL exists yet.
+
+    Args:
+        file_path: Path to the _index.md file relative to vault root (e.g., '20_Projects/_index.md')
+        section:   Heading name to execute (case-insensitive). Leave empty to list sections.
+    """
+    import re
+
+    def parse_sections(content: str) -> list[dict]:
+        """Return list of {heading, sql, dataview} dicts, one per heading that has at least one block."""
+        # Split into chunks at each heading line
+        heading_re = re.compile(r'^(#{1,6} .+)$', re.MULTILINE)
+        positions = [(m.start(), m.group(1).lstrip('#').strip()) for m in heading_re.finditer(content)]
+
+        # Add a sentinel at the end
+        boundaries = positions + [(len(content), None)]
+
+        sections = []
+        for i, (start, heading) in enumerate(positions):
+            chunk = content[start:boundaries[i + 1][0]]
+
+            sql_match = re.search(r'```sql\n([\s\S]*?)```', chunk)
+            dv_match  = re.search(r'```dataview\n([\s\S]*?)```', chunk)
+
+            if sql_match or dv_match:
+                sql_raw = sql_match.group(1) if sql_match else None
+                # Strip inline SQL comments
+                sql_clean = None
+                if sql_raw:
+                    sql_clean = '\n'.join(
+                        l for l in sql_raw.split('\n') if not l.strip().startswith('--')
+                    ).strip()
+                sections.append({
+                    "heading":  heading,
+                    "sql":      sql_clean,
+                    "dataview": dv_match.group(1).strip() if dv_match else None,
+                })
+
+        return sections
+
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response.raise_for_status()
+        content = response.json().get("content", "")
+        sections = parse_sections(content)
+
+        if not sections:
+            return f"No Dataview or SQL sections found in {file_path}"
+
+        # -- List mode --
+        if not section:
+            lines = [f"Sections in {file_path}:\n"]
+            for s in sections:
+                if s["sql"]:
+                    lines.append(f"  ✓ {s['heading']}  (SQL ready)")
+                else:
+                    lines.append(f"  ~ {s['heading']}  (Dataview only — no SQL yet)")
+            return "\n".join(lines)
+
+        # -- Execute mode --
+        target = section.strip().lower()
+        match = next((s for s in sections if s["heading"].lower() == target), None)
+        if not match:
+            available = ", ".join(f'"{s["heading"]}"' for s in sections)
+            return f'Section "{section}" not found. Available: {available}'
+
+        if match["sql"]:
+            return query_vault(match["sql"])
+
+        # Dataview only — return the query so the agent knows what it does
+        return (
+            f'Section "{match["heading"]}" has no SQL block yet.\n\n'
+            f'Dataview query:\n```dataview\n{match["dataview"]}\n```'
+        )
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return f"File not found: {file_path}"
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def sync_vault() -> str:
     """Manually trigger a vault sync with Obsidian Sync service"""
     try:

@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
+const { db: vaultDb } = require('./vault-indexer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -774,6 +775,23 @@ app.get('/api/agent/context', (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Execute a SQL SELECT query against the vault index
+app.post('/api/query', (req, res) => {
+  const { sql } = req.body;
+  if (!sql || typeof sql !== 'string') {
+    return res.status(400).json({ error: '"sql" is required' });
+  }
+  if (!sql.trim().toUpperCase().startsWith('SELECT')) {
+    return res.status(400).json({ error: 'Only SELECT statements are allowed' });
+  }
+  try {
+    const results = vaultDb.prepare(sql).all();
+    res.json({ results, count: results.length });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

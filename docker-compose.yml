@@ -49,13 +49,15 @@ services:
     volumes:
       - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
-    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && npm install express cors js-yaml && node server.js"
+      - sqlite-data:/data
+    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && cat /tmp/repo/vault-indexer.js > /tmp/app/vault-indexer.js && npm install express cors js-yaml better-sqlite3 chokidar && node server.js"
     expose:
       - "3000"
     environment:
       - VAULT_PATH=/vault
+      - SQLITE_PATH=/data/vault-index.db
       - PORT=3000
-      - API_TOKEN=${API_TOKEN} 
+      - API_TOKEN=${API_TOKEN}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"
@@ -85,3 +87,4 @@ services:
 volumes:
   traefik-letsencrypt:
   obsidian-cache:
+  sqlite-data:
