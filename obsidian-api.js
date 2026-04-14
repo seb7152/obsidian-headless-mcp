@@ -238,7 +238,7 @@ app.get('/api/files', (req, res) => {
     res.json({
       files: results,
       count: results.length,
-      filters: { type, project, path: filterPath, since, before }
+      filters: { ...frontmatterFilters, path: filterPath, since, before }
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
