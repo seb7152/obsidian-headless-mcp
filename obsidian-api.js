@@ -180,7 +180,7 @@ function fuzzySuggest(target, { byName }, maxResults = 3) {
 // List all markdown files with optional filters
 app.get('/api/files', (req, res) => {
   try {
-    const { type, project, path: filterPath, since, before } = req.query;
+    const { path: filterPath, since, before, ...frontmatterFilters } = req.query;
 
     const files = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
       .stdout
@@ -205,10 +205,10 @@ app.get('/api/files', (req, res) => {
       })
       .filter(f => f)
       .filter(f => {
-        // Filter by type (frontmatter prop)
-        if (type && f.frontmatter.type !== type) return false;
-        // Filter by project (frontmatter prop)
-        if (project && f.frontmatter.project !== project) return false;
+        // Filter by any frontmatter property (e.g. ?status=reviewed&type=note)
+        for (const [key, val] of Object.entries(frontmatterFilters)) {
+          if (String(f.frontmatter[key] ?? '') !== String(val)) return false;
+        }
         // Filter by path pattern (optional)
         if (filterPath && !f.path.includes(filterPath)) return false;
         // Filter by since/before date (frontmatter.created, fallback to filename date)
