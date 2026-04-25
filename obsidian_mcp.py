@@ -14,7 +14,7 @@ API_TOKEN = os.getenv("API_TOKEN", "")
 api_client = httpx.Client(headers={"Authorization": f"Bearer {API_TOKEN}"})
 
 # Create MCP server — DNS rebinding protection disabled because token auth is handled
-# by TokenAuthMiddleware (the API token is required in the URL path)
+# by TokenAuthMiddleware (token required either in URL path or Authorization header)
 mcp = FastMCP("Obsidian", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 
 # ==================== RESOURCES ====================
@@ -494,30 +494,58 @@ def get_sync_status() -> str:
 # ==================== RUN ====================
 
 class TokenAuthMiddleware:
+    """Authenticate requests via either a URL path prefix /{token}/... or
+    an `Authorization: Bearer <token>` header. Both schemes are accepted so
+    clients that can't customize the request URL (path-only) and clients that
+    prefer header-based auth (Bearer) both work."""
+
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
         if scope["type"] in ("http", "websocket"):
             path = scope.get("path", "")
-            # Expect /{token}/...
-            if API_TOKEN and not path.startswith(f"/{API_TOKEN}"):
+            headers = scope.get("headers", [])
+
+            # Look for Authorization: Bearer <token>
+            auth_header = next(
+                (v for k, v in headers if k.lower() == b"authorization"),
+                None,
+            )
+            header_token = None
+            if auth_header:
+                try:
+                    decoded = auth_header.decode("latin-1").strip()
+                except Exception:
+                    decoded = ""
+                if decoded.lower().startswith("bearer "):
+                    header_token = decoded[7:].strip()
+
+            path_has_token = bool(API_TOKEN) and path.startswith(f"/{API_TOKEN}")
+            header_ok = bool(API_TOKEN) and header_token == API_TOKEN
+
+            if API_TOKEN and not path_has_token and not header_ok:
                 async def send_401(send):
-                    await send({"type": "http.response.start", "status": 401, "headers": []})
+                    await send({
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [(b"www-authenticate", b'Bearer realm="mcp"')],
+                    })
                     await send({"type": "http.response.body", "body": b"Unauthorized"})
                 await send_401(send)
                 return
+
             scope = dict(scope)
-            # Strip the token prefix from path
-            if API_TOKEN:
+            # Strip the token prefix from path only if it's actually there
+            if API_TOKEN and path_has_token:
                 new_path = path[len(f"/{API_TOKEN}"):] or "/"
                 scope["path"] = new_path
                 raw_path = scope.get("raw_path", path.encode())
                 scope["raw_path"] = raw_path[len(f"/{API_TOKEN}".encode()):] or b"/"
             # Replace Host header with localhost to bypass FastMCP DNS rebinding protection
-            headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"host"]
-            headers.append((b"host", b"localhost"))
-            scope["headers"] = headers
+            new_headers = [(k, v) for k, v in headers if k.lower() != b"host"]
+            new_headers.append((b"host", b"localhost"))
+            scope["headers"] = new_headers
         await self.app(scope, receive, send)
 
 

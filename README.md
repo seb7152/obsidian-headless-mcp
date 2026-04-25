@@ -124,13 +124,30 @@ curl -X POST https://obsidian-api.yourdomain.com/api/file/notes%2Fnew.md \
 
 ### Using with Claude Code
 
-Add to your Claude Code config:
+The MCP server accepts the API token via **two methods** — pick whichever your client supports:
+
+**1. Token in URL path** (legacy):
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "url": "https://mcp.yourdomain.com/<API_TOKEN>",
+      "transport": "http"
+    }
+  }
+}
+```
+
+**2. Authorization header** (recommended):
 ```json
 {
   "mcpServers": {
     "obsidian": {
       "url": "https://mcp.yourdomain.com",
-      "transport": "http"
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer <API_TOKEN>"
+      }
     }
   }
 }
