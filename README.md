@@ -8,39 +8,35 @@ Complete deployment of Obsidian Headless with a REST API wrapper and MCP server 
 Internet
   ↓
 Traefik (reverse proxy + SSL/TLS)
-  ├─ obsidian-api.votredomaine.com   → Node.js API wrapper
-  └─ mcp.votredomaine.com             → Python MCP server
+  ├─ obsidian-api.yourdomain.com   → Node.js REST API
+  └─ mcp.yourdomain.com            → Python MCP server
        ↓
-Obsidian Headless (syncs with Obsidian Sync service)
+Obsidian Headless (syncs with Obsidian Sync)
        ↓
-Your vault files
+Your vault files  ←→  SQLite index (vault-indexer)
 ```
 
 ## Services
 
 ### 1. **Traefik**
-- Reverse proxy with automatic SSL/TLS (Let's Encrypt)
-- Routes HTTPS traffic to services
+Reverse proxy with automatic SSL/TLS (Let's Encrypt). Routes HTTPS traffic to services.
 
 ### 2. **Obsidian Headless**
-- Synchronizes your vault from command line
-- Uses Obsidian Sync for end-to-end encrypted backup
-- Stores vault in `./vault` directory
+Synchronizes your vault from the command line using Obsidian Sync (end-to-end encrypted). Stores files in `./vault`.
 
 ### 3. **Obsidian API** (Node.js)
-- REST API wrapper around Obsidian Headless
-- Endpoints for file operations, search, sync
-- Exposed at `https://obsidian-api.DOMAIN`
+REST API wrapping vault file operations. All endpoints require `Authorization: Bearer <API_TOKEN>` except `/health`. Exposed at `https://obsidian-api.DOMAIN`.
 
-### 4. **MCP Server** (Python)
-- Model Context Protocol server
-- Exposes vault as resources and tools to AI models
-- Exposed at `https://mcp.DOMAIN`
+### 4. **Vault Indexer** (Node.js)
+Embedded SQLite index kept in sync with the vault via a file watcher. Indexes frontmatter, tags, and tasks from every `.md` file. Queried via `POST /api/query`.
+
+### 5. **MCP Server** (Python)
+Model Context Protocol server exposing the vault as tools and resources to AI models. Exposed at `https://mcp.DOMAIN`.
 
 ## Prerequisites
 
-- Docker & Docker Compose installed on Hostinger
-- Obsidian Sync subscription (for encryption & backup)
+- Docker & Docker Compose
+- Obsidian Sync subscription
 - Valid domain with DNS pointing to your server
 - Obsidian account credentials
 
@@ -48,97 +44,288 @@ Your vault files
 
 ### 1. Clone/Download Files
 
-Get these files:
 ```
 .
 ├── docker-compose.yml
-├── .env.example → rename to .env
+├── .env           (copy from .env.example)
 ├── obsidian-api.js
 ├── obsidian_mcp.py
-└── vault/          (created automatically)
+├── vault-indexer.js
+└── vault/         (created automatically)
 ```
 
 ### 2. Configure Environment
-
-Copy `.env.example` to `.env` and fill in:
 
 ```bash
 ACME_EMAIL=your-email@example.com
 DOMAIN=yourdomain.com
 OBSIDIAN_EMAIL=your-obsidian-email@example.com
-OBSIDIAN_PASSWORD=your-account-password           # Password to login to Obsidian
-VAULT_PASSWORD=your-vault-encryption-password    # Encryption password for the vault
-VAULT_NAME=Your-Vault-Name                       # Exact vault name in Obsidian Sync
+OBSIDIAN_PASSWORD=your-account-password       # Obsidian account password (for `ob login`)
+VAULT_PASSWORD=your-vault-encryption-password # Vault encryption key (Obsidian → Settings → Sync → Encryption)
+VAULT_NAME=Your-Vault-Name                    # Exact vault name in Obsidian Sync
+API_TOKEN=your-secret-token                   # Shared token for REST API + MCP auth
 ```
-
-**Important:** There are two different passwords:
-- **OBSIDIAN_PASSWORD**: Your Obsidian account password (for `ob login`)
-- **VAULT_PASSWORD**: Your vault encryption password (found in Obsidian → Settings → Sync → Encryption)
 
 ### 3. Deploy
 
-In your Hostinger Docker Compose editor (hPanel):
+Paste `docker-compose.yml` into your host's Docker Compose editor, add the environment variables, and deploy. First start takes ~1 minute.
 
-1. Paste the `docker-compose.yml` content
-2. Add environment variables (ACME_EMAIL, DOMAIN, etc.)
-3. Deploy
+---
 
-The first start will take a minute as services initialize.
+## REST API
 
-## Endpoints
+Base URL: `https://obsidian-api.DOMAIN`
 
-### REST API
+All endpoints require:
 ```
-GET  /api/files                    # List all files
-GET  /api/file/{path}              # Read a file
-POST /api/file/{path}              # Write/create a file
-GET  /api/search?q={query}         # Search vault
-POST /api/sync                     # Trigger sync
-GET  /api/sync/status              # Get sync status
-GET  /health                       # Health check
+Authorization: Bearer <API_TOKEN>
 ```
+Exception: `GET /health` is public.
 
-### MCP Server
-- `obsidian://files` - Resource listing all files
-- `obsidian://health` - Resource checking vault status
-- `read_file()` - Tool to read files
-- `write_file()` - Tool to create/modify files
-- `append_to_file()` - Tool to append content
-- `search_vault()` - Tool to search
-- `sync_vault()` - Tool to trigger sync
-- `get_sync_status()` - Tool to get sync status
+### Health
 
-## Usage Examples
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Server health check (no auth required) |
 
-### Reading a file via API
 ```bash
-curl https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md
+curl https://obsidian-api.yourdomain.com/health
+# → {"status":"ok","vault":"/vault"}
 ```
 
-### Writing a file via API
+### Files — single file
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/file/{path}` | Read a file — returns `frontmatter`, `body`, and `content` |
+| `POST` | `/api/file/{path}` | Write or create a file (full content replace) |
+| `PATCH` | `/api/file/{path}` | Merge-update frontmatter fields (body untouched) |
+| `PATCH` | `/api/file/{path}/body` | Replace body only (frontmatter untouched) |
+| `POST` | `/api/file/{path}/append` | Append content at end of file |
+| `POST` | `/api/file/{path}/move` | Move file to a new path |
+| `GET` | `/api/file/{path}/links` | List broken wikilinks (optionally with fuzzy suggestions) |
+
+**Read a file**
 ```bash
-curl -X POST https://obsidian-api.yourdomain.com/api/file/notes%2Fnew.md \
+curl -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md
+# → {"path":"notes/my-note.md","frontmatter":{...},"body":"...","content":"..."}
+```
+
+**Write a file**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"content": "# My Note\n\nContent here"}'
+  -d '{"content":"# My Note\n\nContent here"}' \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fnew.md
 ```
 
-### Using with Claude Code
-
-The MCP server accepts the API token via **two methods** — pick whichever your client supports:
-
-**1. Token in URL path** (legacy):
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "url": "https://mcp.yourdomain.com/<API_TOKEN>",
-      "transport": "http"
-    }
-  }
-}
+**Update frontmatter only**
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"status":"done","reviewed":true}' \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md
 ```
 
-**2. Authorization header** (recommended):
+**Append content**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"## New Section\n\nAdded text."}' \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/append
+```
+
+**Move a file**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"destination":"archive/my-note.md"}' \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/move
+```
+
+**Check broken wikilinks**
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/links?suggest=true"
+# → {"path":"notes/my-note.md","count":5,"broken_count":1,"broken_links":[{"raw":"...","target":"...","suggestions":["..."]}]}
+```
+
+### Files — bulk operations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/files` | List all `.md` files with optional filters |
+| `POST` | `/api/files/batch` | Read up to 100 files in one request |
+| `PATCH` | `/api/files/batch` | Apply same frontmatter patch to up to 100 files |
+| `POST` | `/api/files/move` | Move multiple files to a destination folder |
+
+**List files with filters**
+
+Query parameters (all optional):
+- `path` — substring match on file path
+- `since=YYYY-MM-DD` — only files created on or after this date
+- `before=YYYY-MM-DD` — only files created on or before this date
+- any frontmatter key — e.g. `status=done&type=note`
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/files?status=reviewed&since=2025-01-01"
+# → {"files":[{"path":"...","frontmatter":{...},"hasContent":true}],"count":12,"filters":{...}}
+```
+
+**Batch read**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["notes/a.md","notes/b.md"]}' \
+  https://obsidian-api.yourdomain.com/api/files/batch
+```
+
+**Bulk frontmatter update**
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["notes/a.md","notes/b.md"],"frontmatter":{"status":"archive"}}' \
+  https://obsidian-api.yourdomain.com/api/files/batch
+```
+
+**Bulk move**
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["inbox/note1.md","inbox/note2.md"],"destination_folder":"30_Knowledge"}' \
+  https://obsidian-api.yourdomain.com/api/files/move
+```
+
+### Directory
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/directory` | List vault root (files and subdirectories) |
+| `GET` | `/api/directory/{path}` | List a specific directory |
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/directory/20_Projects
+# → {"path":"20_Projects","entries":[{"name":"ProjectA","path":"20_Projects/ProjectA","type":"directory"},...],"count":5}
+```
+
+### Search
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/search` | Search vault content |
+
+Query parameters:
+- `q` (required) — search term
+- `fuzzy=true` — fuzzy title matching with scoring (default: exact keyword match via grep)
+- `since=YYYY-MM-DD` — filter by creation date
+- `before=YYYY-MM-DD` — filter by creation date
+
+```bash
+# Keyword search
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/search?q=meeting+notes&since=2025-01-01"
+
+# Fuzzy search
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/search?q=meting+nots&fuzzy=true"
+# → {"query":"...","results":[{"file":"...","title":"...","matches":["..."],"date":"2025-03-10","score":0.82}],"count":3,"fuzzy":true}
+```
+
+### SQL Query
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/query` | Run a SQL `SELECT` against the vault index |
+
+The vault index has two tables:
+
+**`files`**
+| Column | Type | Description |
+|--------|------|-------------|
+| `path` | TEXT | Relative path from vault root |
+| `title` | TEXT | Frontmatter `title` or filename |
+| `created` | TEXT | Frontmatter `created` (YYYY-MM-DD) |
+| `modified` | TEXT | Frontmatter `modified` or file mtime |
+| `tags` | TEXT | JSON array of tags (frontmatter + inline `#tag`) |
+| `frontmatter` | TEXT | Full frontmatter as JSON object |
+
+**`tasks`**
+| Column | Type | Description |
+|--------|------|-------------|
+| `file_path` | TEXT | Parent file path |
+| `text` | TEXT | Task text (without the checkbox) |
+| `completed` | INTEGER | `0` = open, `1` = done |
+| `due` | TEXT | Due date YYYY-MM-DD (from `📅` or `due::` syntax), or null |
+
+Only `SELECT` statements are allowed.
+
+```bash
+# Notes with status=active, most recent first
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT path, title, created FROM files WHERE json_extract(frontmatter, '\''$.status'\'') = '\''active'\'' ORDER BY created DESC LIMIT 10"}' \
+  https://obsidian-api.yourdomain.com/api/query
+
+# Open tasks due in the next 7 days
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"sql":"SELECT file_path, text, due FROM tasks WHERE completed = 0 AND due <= date('\''now'\'', '\''+7 days'\'') ORDER BY due"}' \
+  https://obsidian-api.yourdomain.com/api/query
+```
+
+Useful JSON operators:
+```sql
+-- Filter by frontmatter field
+WHERE json_extract(frontmatter, '$.status') = 'done'
+
+-- Filter by tag
+WHERE tags LIKE '%"project"%'
+
+-- Extract nested field
+SELECT path, json_extract(frontmatter, '$.priority') AS priority FROM files
+```
+
+### Projects
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/projects` | List all subdirectories of `20_Projects/` |
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/projects
+# → {"projects":[{"name":"ProjectA","path":"20_Projects/ProjectA"}],"count":3}
+```
+
+### Agent Context
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/agent/context` | Read `agent.md` from vault root |
+
+Returns the contents of `agent.md`, which can hold instructions or context for AI agents working with the vault.
+
+### Sync
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/sync` | Trigger a vault sync with Obsidian Sync |
+| `GET` | `/api/sync/status` | Get current sync status |
+
+---
+
+## MCP Server
+
+Exposes the vault as MCP tools and resources for AI agents. Base URL: `https://mcp.DOMAIN`.
+
+### Authentication
+
+Two methods are supported — use whichever your client supports:
+
+**1. Authorization header (recommended)**
 ```json
 {
   "mcpServers": {
@@ -153,51 +340,113 @@ The MCP server accepts the API token via **two methods** — pick whichever your
 }
 ```
 
-Then Claude can read/write your notes directly!
+**2. Token in URL path (legacy)**
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "url": "https://mcp.yourdomain.com/<API_TOKEN>",
+      "transport": "http"
+    }
+  }
+}
+```
+
+### Resources
+
+| URI | Description |
+|-----|-------------|
+| `obsidian://files` | List all markdown files in the vault |
+| `obsidian://health` | Check vault health status |
+
+### Tools
+
+#### File Operations
+
+| Tool | Description |
+|------|-------------|
+| `read_file(file_path)` | Read a markdown file; returns full content |
+| `write_file(file_path, content)` | Write or create a file (full replace) |
+| `append_to_file(file_path, content)` | Append content at end of file |
+| `patch_file(file_path, old_text, new_text)` | Surgical text replacement — replaces first occurrence of `old_text` with `new_text`; errors if not found |
+
+#### Frontmatter
+
+| Tool | Description |
+|------|-------------|
+| `update_frontmatter(file_path, updates)` | Merge-update frontmatter fields; body untouched; set a value to `null` to delete a field |
+| `bulk_update_frontmatter(file_paths, updates)` | Apply the same frontmatter patch to multiple files (up to 100) |
+
+#### Directory & Search
+
+| Tool | Description |
+|------|-------------|
+| `list_directory(dir_path)` | List files and subdirectories; leave `dir_path` empty for vault root |
+| `search_vault(query, fuzzy, since, before)` | Search vault — keyword (default) or fuzzy with date filters |
+| `get_projects()` | List project folders under `20_Projects/` |
+
+#### SQL & Index
+
+| Tool | Description |
+|------|-------------|
+| `query_vault(sql)` | Run a SQL `SELECT` against the vault index (same `files`/`tasks` schema as the REST API) |
+| `run_index(file_path, section)` | Execute SQL blocks embedded in a `_index.md` file; leave `section` empty to list available sections |
+
+#### Sync
+
+| Tool | Description |
+|------|-------------|
+| `sync_vault()` | Trigger vault sync with Obsidian Sync |
+| `get_sync_status()` | Get current sync status |
+
+---
 
 ## Troubleshooting
 
-### Obsidian Headless not syncing
-- Check credentials in `.env`
-- Verify vault name matches exactly
+**Obsidian Headless not syncing**
+- Check credentials in `.env` (`OBSIDIAN_EMAIL`, `OBSIDIAN_PASSWORD`, `VAULT_PASSWORD`)
+- Verify `VAULT_NAME` matches exactly (case-sensitive)
 - Check logs: `docker logs obsidian-headless`
 
-### API not responding
-- Check if obsidian-headless is running first
-- Verify Traefik routing: `docker logs traefik`
-- Check DOMAIN environment variable matches your DNS
+**API returning 401**
+- Confirm `API_TOKEN` is set in `.env` and matches your `Authorization: Bearer <token>` header
+- `/health` is the only public endpoint — everything else requires the token
 
-### SSL certificate issues
-- Wait 5 minutes for Let's Encrypt challenge
-- Check firewall allows port 80 (for ACME validation)
-- Verify ACME_EMAIL is correct
+**API not responding**
+- Check Traefik routing: `docker logs traefik`
+- Verify DNS and `DOMAIN` env var
+
+**SSL certificate issues**
+- Wait ~5 minutes for the Let's Encrypt ACME challenge
+- Ensure port 80 is open (required for ACME HTTP-01 validation)
+- Verify `ACME_EMAIL` is correct
+
+**SQL query errors**
+- Only `SELECT` statements are allowed
+- Tags are stored as JSON arrays: use `tags LIKE '%"tagname"%'`
+- Frontmatter fields: use `json_extract(frontmatter, '$.field_name')`
+
+---
 
 ## Security Notes
 
-⚠️ **Important:**
-- Keep `.env` file secure (never commit to Git)
-- Use strong Obsidian passwords
-- The API doesn't have built-in auth—consider adding OAuth or API keys in production
-- Obsidian Sync provides end-to-end encryption
+- Keep `.env` secure — never commit it to Git
+- `API_TOKEN` is shared between the REST API and MCP server; all non-health endpoints are protected
+- Obsidian Sync provides end-to-end encryption for vault data at rest
+- Directory traversal is blocked server-side on all file endpoints
+
+---
 
 ## Files Reference
 
-### obsidian-api.js
-Express server that wraps Obsidian Headless CLI with REST endpoints.
+### `obsidian-api.js`
+Express REST API server. Handles file reads/writes, frontmatter parsing (js-yaml), search (grep + fuzzy), directory listing, wikilink resolution, and SQL queries via the vault indexer.
 
-Features:
-- File read/write with directory traversal protection
-- Full-text search using `grep`
-- Sync management
-- CORS enabled
+### `vault-indexer.js`
+SQLite indexer (better-sqlite3). Bootstraps a full index on first start, then keeps it live via a chokidar file watcher. Indexes frontmatter, tags, and tasks from every `.md` file.
 
-### obsidian_mcp.py
-FastMCP server exposing vault as Model Context Protocol resources and tools.
-
-Features:
-- Resource for listing files
-- Tools for common operations
-- Streamable HTTP transport for remote access
+### `obsidian_mcp.py`
+FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes `TokenAuthMiddleware` supporting both URL-path and Bearer-header authentication.
 
 ## License
 
