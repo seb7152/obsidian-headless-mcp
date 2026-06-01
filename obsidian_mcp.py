@@ -302,39 +302,41 @@ def bulk_update_frontmatter(file_paths: list, updates: dict) -> str:
 
 
 @mcp.tool()
-def patch_file(file_path: str, old_text: str, new_text: str) -> str:
+def patch_file(file_path: str, old_text: str, new_text: str, replace_all: bool = False) -> str:
     """Replace a specific piece of text in a file — surgical edit without touching the rest.
 
-    Searches for `old_text` in the file content and replaces the first occurrence
-    with `new_text`. Works on any part of the file (frontmatter or body), at any
-    granularity: a word, a sentence, a whole section.
+    Searches for `old_text` in the file content and replaces it with `new_text`. By
+    default only the first occurrence is replaced; set `replace_all` to replace every
+    occurrence. Works on any part of the file (frontmatter or body), at any granularity:
+    a word, a sentence, a whole section. The replacement is performed atomically on the
+    server (no read-modify-write race).
 
     Returns an error if `old_text` is not found, so you know the edit didn't apply silently.
 
     Args:
         file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
         old_text: Exact text to find (must match precisely, including whitespace)
-        new_text: Text to replace it with
+        new_text: Text to replace it with (use an empty string to delete the matched text)
+        replace_all: Replace every occurrence instead of just the first (default: False)
     """
     try:
-        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
-        response.raise_for_status()
-        content = response.json().get("content", "")
-
-        if old_text not in content:
-            return f"Text not found in {file_path} — no changes made"
-
-        new_content = content.replace(old_text, new_text, 1)
-
-        write_response = api_client.post(
-            f"{OBSIDIAN_API_URL}/file/{file_path}",
-            json={"content": new_content}
+        response = api_client.patch(
+            f"{OBSIDIAN_API_URL}/file/{file_path}/patch",
+            json={"old_text": old_text, "new_text": new_text, "replace_all": replace_all}
         )
-        write_response.raise_for_status()
-        return f"Patched {file_path}"
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
+
+        if response.status_code == 404:
             return f"File not found: {file_path}"
+        if response.status_code == 422:
+            return f"Text not found in {file_path} — no changes made"
+        if response.status_code == 400:
+            return f"Invalid patch request: {response.json().get('error', 'bad request')}"
+
+        response.raise_for_status()
+        data = response.json()
+        count = data.get("replacements", 0)
+        return f"Patched {file_path} ({count} replacement{'s' if count != 1 else ''})"
+    except httpx.HTTPStatusError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: {e}"

@@ -178,6 +178,18 @@ function fuzzySuggest(target, { byName }, maxResults = 3) {
     .map(({ paths }) => paths[0]);
 }
 
+// Helper: count non-overlapping occurrences of a literal substring
+function countOccurrences(haystack, needle) {
+  if (needle === '') return 0;
+  let count = 0;
+  let idx = haystack.indexOf(needle);
+  while (idx !== -1) {
+    count++;
+    idx = haystack.indexOf(needle, idx + needle.length);
+  }
+  return count;
+}
+
 // List all markdown files with optional filters
 app.get('/api/files', (req, res) => {
   try {
@@ -493,6 +505,76 @@ app.post('/api/files/move', (req, res) => {
 
   const failed = results.filter(r => r.error);
   res.json({ results, count: results.length, failed_count: failed.length });
+});
+
+// Surgical text patch — find `old_text` and replace it, leaving the rest of the file untouched (PATCH)
+// Body: { "old_text": "...", "new_text": "...", "replace_all": false }
+// MUST come before the generic PATCH /api/file/{path} route
+app.patch(/^\/api\/file\/(.+)\/patch$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+
+    // Security: prevent directory traversal
+    if (!filePath.startsWith(VAULT_PREFIX)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { old_text, new_text, replace_all } = req.body || {};
+
+    // old_text must be a non-empty string — an empty needle would be meaningless / inject everywhere
+    if (typeof old_text !== 'string' || old_text.length === 0) {
+      return res.status(400).json({ error: '"old_text" is required and must be a non-empty string' });
+    }
+    // new_text is optional (omitting it deletes the matched text), but must be a string when present
+    if (new_text !== undefined && new_text !== null && typeof new_text !== 'string') {
+      return res.status(400).json({ error: '"new_text" must be a string' });
+    }
+    const replacement = (new_text === undefined || new_text === null) ? '' : new_text;
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const occurrences = countOccurrences(content, old_text);
+
+    // Don't fail silently — tell the caller the anchor wasn't found
+    if (occurrences === 0) {
+      return res.status(422).json({
+        error: 'Text not found — no changes made',
+        path: req.params[0]
+      });
+    }
+
+    const doAll = replace_all === true;
+    let newContent;
+    let replacements;
+    if (doAll) {
+      newContent = content.split(old_text).join(replacement);
+      replacements = occurrences;
+    } else {
+      const idx = content.indexOf(old_text);
+      newContent = content.slice(0, idx) + replacement + content.slice(idx + old_text.length);
+      replacements = 1;
+    }
+
+    // No-op guard: avoid rewriting the file (and bumping mtime) when nothing changed
+    const changed = newContent !== content;
+    if (changed) {
+      fs.writeFileSync(filePath, newContent, 'utf-8');
+    }
+
+    res.json({
+      success: true,
+      path: req.params[0],
+      occurrences,
+      replacements,
+      replace_all: doAll,
+      changed
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Update frontmatter only (PATCH)
