@@ -101,6 +101,7 @@ curl https://obsidian-api.yourdomain.com/health
 | `POST` | `/api/file/{path}` | Write or create a file (full content replace) |
 | `PATCH` | `/api/file/{path}` | Merge-update frontmatter fields (body untouched) |
 | `PATCH` | `/api/file/{path}/body` | Replace body only (frontmatter untouched) |
+| `PATCH` | `/api/file/{path}/patch` | Surgical text replace — swap `old_text` for `new_text`, rest untouched |
 | `POST` | `/api/file/{path}/append` | Append content at end of file |
 | `POST` | `/api/file/{path}/move` | Move file to a new path |
 | `GET` | `/api/file/{path}/links` | List broken wikilinks (optionally with fuzzy suggestions) |
@@ -135,6 +136,25 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   -d '{"content":"## New Section\n\nAdded text."}' \
   https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/append
 ```
+
+**Surgical text patch**
+
+Replace a precise piece of text without rewriting the whole file. By default only the
+**first** occurrence is replaced; pass `"replace_all": true` to replace every occurrence.
+Omit `new_text` (or set it to `""`) to delete the matched text.
+
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"old_text":"- [ ] Draft proposal","new_text":"- [x] Draft proposal"}' \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/patch
+# → {"success":true,"path":"notes/my-note.md","occurrences":1,"replacements":1,"replace_all":false,"changed":true}
+```
+
+Edge cases:
+- `400` — `old_text` missing/empty, or `new_text` is not a string
+- `404` — file does not exist
+- `422` — `old_text` not found in the file (nothing is changed; the edit never applies silently)
 
 **Move a file**
 ```bash
@@ -368,7 +388,7 @@ Two methods are supported — use whichever your client supports:
 | `read_file(file_path)` | Read a markdown file; returns full content |
 | `write_file(file_path, content)` | Write or create a file (full replace) |
 | `append_to_file(file_path, content)` | Append content at end of file |
-| `patch_file(file_path, old_text, new_text)` | Surgical text replacement — replaces first occurrence of `old_text` with `new_text`; errors if not found |
+| `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found |
 
 #### Frontmatter
 
