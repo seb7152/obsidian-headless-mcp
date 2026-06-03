@@ -164,7 +164,7 @@ function startWatcher() {
   // VPS hosts), which would silently break live indexing AND webhooks. Allow
   // forcing polling via CHOKIDAR_USEPOLLING (the docker-compose sets it true).
   const watchOptions = {
-    ignored: /[\/\\]\./,
+    ignored: /(^|[\/\\])\../, // dotfiles/dirs (.trash, .obsidian, …)
     ignoreInitial: true,
     persistent: true,
     awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 }
@@ -175,17 +175,25 @@ function startWatcher() {
     watchOptions.interval = Number(process.env.CHOKIDAR_INTERVAL || 1000);
   }
 
+  const isMarkdown = (fp) => fp.toLowerCase().endsWith('.md');
+
+  // Watch the vault DIRECTORY (not a `**/*.md` glob): chokidar's glob watching
+  // misses newly-added files — especially under polling — and was removed
+  // entirely in chokidar v4. Filter to .md in the handlers instead.
   chokidar
-    .watch(path.join(VAULT_PATH, '**/*.md'), watchOptions)
+    .watch(VAULT_PATH, watchOptions)
     .on('add', (fp) => {
+      if (!isMarkdown(fp)) return;
       const r = indexFile(fp);
       if (r) webhooks.dispatch('add', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
     })
     .on('change', (fp) => {
+      if (!isMarkdown(fp)) return;
       const r = indexFile(fp);
       if (r) webhooks.dispatch('change', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
     })
     .on('unlink', (fp) => {
+      if (!isMarkdown(fp)) return;
       const rel = path.relative(VAULT_PATH, fp);
       const frontmatter = lastKnownFrontmatter(rel); // read before deleting from index
       removeFile(fp);
