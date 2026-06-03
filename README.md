@@ -530,6 +530,11 @@ Two methods are supported — use whichever your client supports:
 - Tags are stored as JSON arrays: use `tags LIKE '%"tagname"%'`
 - Frontmatter fields: use `json_extract(frontmatter, '$.field_name')`
 
+**Index not updating / webhooks not firing on file changes**
+- The live index and webhooks rely on a chokidar file watcher. On many Docker hosts (especially VPS bind mounts), inotify events don't propagate into the container, so changes go undetected.
+- The compose file sets `CHOKIDAR_USEPOLLING=true` (with `CHOKIDAR_INTERVAL=1000` ms) on `obsidian-api` to poll instead. If you run the API outside this compose file, set those env vars yourself.
+- Symptom check: create a `.md` file, then `POST /api/query` for it — if it never appears, the watcher isn't seeing changes (enable polling). The `/api/webhooks/{id}/test` endpoint bypasses the watcher, so it succeeding does **not** prove the watcher works.
+
 ---
 
 ## Security Notes
