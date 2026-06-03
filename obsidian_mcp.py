@@ -378,17 +378,20 @@ def move_file(file_path: str, destination: str) -> str:
 
 
 @mcp.tool()
-def delete_file(file_path: str) -> str:
+def delete_file(file_path: str, hard: bool = False) -> str:
     """Delete a file from the vault.
 
-    Permanently removes the file at `file_path` (relative to vault root). This
-    cannot be undone from here, and the deletion will sync to your other devices.
+    By default this is a SOFT delete: the file is moved to a hidden `.trash/`
+    folder inside the vault (not indexed, recoverable). Set `hard=True` to remove
+    it permanently instead. Either way the change syncs to your other devices.
 
     Args:
         file_path: Path to the file relative to vault root (e.g., '00_Inbox/old.md')
+        hard: Permanently delete instead of moving to .trash/ (default: False)
     """
     try:
-        response = api_client.delete(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        params = {"hard": "true"} if hard else None
+        response = api_client.delete(f"{OBSIDIAN_API_URL}/file/{file_path}", params=params)
 
         if response.status_code == 404:
             return f"File not found: {file_path}"
@@ -398,7 +401,10 @@ def delete_file(file_path: str) -> str:
             return f"Cannot delete {file_path}: {response.json().get('error', 'bad request')}"
 
         response.raise_for_status()
-        return f"Deleted {file_path}"
+        data = response.json()
+        if data.get("mode") == "soft":
+            return f"Moved {file_path} to {data.get('trashed_to', '.trash/')} (soft delete)"
+        return f"Permanently deleted {file_path}"
     except httpx.HTTPStatusError as e:
         return f"Error: {e}"
     except Exception as e:

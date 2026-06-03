@@ -471,16 +471,35 @@ app.post(/^\/api\/file\/(.+)\/move$/, (req, res) => {
   }
 });
 
-// Delete a single file (DELETE)
+// Delete a single file (DELETE). Soft-deletes by default (moves to the hidden,
+// non-indexed `.trash/` folder, recoverable); pass ?hard=true to remove permanently.
 app.delete(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
-    const filePath = path.join(VAULT_PATH, req.params[0]);
+    const rel = req.params[0];
+    const filePath = path.join(VAULT_PATH, rel);
     if (!filePath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied' });
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
     if (!fs.statSync(filePath).isFile()) return res.status(400).json({ error: 'Not a file' });
 
-    fs.unlinkSync(filePath);
-    res.json({ success: true, deleted: req.params[0] });
+    const hard = req.query.hard === 'true' || req.query.hard === '1' || (req.body && req.body.hard === true);
+
+    if (hard) {
+      fs.unlinkSync(filePath);
+      return res.json({ success: true, deleted: rel, mode: 'hard' });
+    }
+
+    // Soft delete: move into `.trash/`, preserving the relative path. If a file
+    // is already trashed there, suffix with a timestamp to avoid clobbering it.
+    let trashRel = path.join('.trash', rel);
+    let trashPath = path.join(VAULT_PATH, trashRel);
+    if (fs.existsSync(trashPath)) {
+      const ext = path.extname(rel);
+      trashRel = path.join('.trash', `${rel.slice(0, rel.length - ext.length)}.${Date.now()}${ext}`);
+      trashPath = path.join(VAULT_PATH, trashRel);
+    }
+    fs.mkdirSync(path.dirname(trashPath), { recursive: true });
+    fs.renameSync(filePath, trashPath);
+    res.json({ success: true, deleted: rel, mode: 'soft', trashed_to: trashRel });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

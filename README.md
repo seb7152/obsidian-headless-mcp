@@ -104,7 +104,7 @@ curl https://obsidian-api.yourdomain.com/health
 | `PATCH` | `/api/file/{path}/patch` | Surgical text replace — swap `old_text` for `new_text`, rest untouched |
 | `POST` | `/api/file/{path}/append` | Append content at end of file |
 | `POST` | `/api/file/{path}/move` | Move file to a new path |
-| `DELETE` | `/api/file/{path}` | Delete a file |
+| `DELETE` | `/api/file/{path}` | Delete a file — soft by default (moved to `.trash/`); `?hard=true` removes it permanently |
 | `GET` | `/api/file/{path}/links` | List broken wikilinks (optionally with fuzzy suggestions) |
 
 **Read a file**
@@ -164,6 +164,20 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   -d '{"destination":"archive/my-note.md"}' \
   https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/move
 ```
+
+**Delete a file**
+```bash
+# Soft delete (default) — moved to .trash/, recoverable
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md
+# → {"success":true,"deleted":"notes/my-note.md","mode":"soft","trashed_to":".trash/notes/my-note.md"}
+
+# Permanent delete
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md?hard=true"
+# → {"success":true,"deleted":"notes/my-note.md","mode":"hard"}
+```
+Soft delete moves the file to a hidden `.trash/` folder at the vault root. That folder is **not indexed** (excluded from search/SQL like all dotfiles), and the deletion still fires the `unlink` webhook event. Empty `.trash/` periodically to reclaim space.
 
 **Check broken wikilinks**
 ```bash
@@ -452,7 +466,7 @@ Two methods are supported — use whichever your client supports:
 | `append_to_file(file_path, content)` | Append content at end of file |
 | `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found |
 | `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically |
-| `delete_file(file_path)` | Permanently delete a file from the vault |
+| `delete_file(file_path, hard=False)` | Delete a file — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
 
 #### Frontmatter
 
