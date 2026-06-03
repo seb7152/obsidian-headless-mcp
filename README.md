@@ -104,6 +104,7 @@ curl https://obsidian-api.yourdomain.com/health
 | `PATCH` | `/api/file/{path}/patch` | Surgical text replace — swap `old_text` for `new_text`, rest untouched |
 | `POST` | `/api/file/{path}/append` | Append content at end of file |
 | `POST` | `/api/file/{path}/move` | Move file to a new path |
+| `DELETE` | `/api/file/{path}` | Delete a file |
 | `GET` | `/api/file/{path}/links` | List broken wikilinks (optionally with fuzzy suggestions) |
 
 **Read a file**
@@ -451,6 +452,7 @@ Two methods are supported — use whichever your client supports:
 | `append_to_file(file_path, content)` | Append content at end of file |
 | `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found |
 | `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically |
+| `delete_file(file_path)` | Permanently delete a file from the vault |
 
 #### Frontmatter
 

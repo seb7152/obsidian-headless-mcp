@@ -471,6 +471,21 @@ app.post(/^\/api\/file\/(.+)\/move$/, (req, res) => {
   }
 });
 
+// Delete a single file (DELETE)
+app.delete(/^\/api\/file\/(.+)$/, (req, res) => {
+  try {
+    const filePath = path.join(VAULT_PATH, req.params[0]);
+    if (!filePath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied' });
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+    if (!fs.statSync(filePath).isFile()) return res.status(400).json({ error: 'Not a file' });
+
+    fs.unlinkSync(filePath);
+    res.json({ success: true, deleted: req.params[0] });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Bulk move files to a destination folder
 // Body: { "paths": ["a.md", "b.md"], "destination_folder": "30_Knowledge/permanent-notes" }
 app.post('/api/files/move', (req, res) => {

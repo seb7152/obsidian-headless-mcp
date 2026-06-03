@@ -378,6 +378,34 @@ def move_file(file_path: str, destination: str) -> str:
 
 
 @mcp.tool()
+def delete_file(file_path: str) -> str:
+    """Delete a file from the vault.
+
+    Permanently removes the file at `file_path` (relative to vault root). This
+    cannot be undone from here, and the deletion will sync to your other devices.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., '00_Inbox/old.md')
+    """
+    try:
+        response = api_client.delete(f"{OBSIDIAN_API_URL}/file/{file_path}")
+
+        if response.status_code == 404:
+            return f"File not found: {file_path}"
+        if response.status_code == 403:
+            return f"Access denied: {response.json().get('error', 'path outside vault')}"
+        if response.status_code == 400:
+            return f"Cannot delete {file_path}: {response.json().get('error', 'bad request')}"
+
+        response.raise_for_status()
+        return f"Deleted {file_path}"
+    except httpx.HTTPStatusError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def query_vault(sql: str) -> str:
     """Execute a SQL SELECT query against the vault index.
 
