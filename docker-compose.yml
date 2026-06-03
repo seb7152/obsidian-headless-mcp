@@ -50,7 +50,7 @@ services:
       - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
       - sqlite-data:/data
-    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && cat /tmp/repo/vault-indexer.js > /tmp/app/vault-indexer.js && npm install express cors js-yaml better-sqlite3 chokidar && node server.js"
+    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && cat /tmp/repo/vault-indexer.js > /tmp/app/vault-indexer.js && cat /tmp/repo/webhooks.js > /tmp/app/webhooks.js && npm install express cors js-yaml better-sqlite3 chokidar && node server.js"
     expose:
       - "3000"
     environment:
@@ -58,6 +58,10 @@ services:
       - SQLITE_PATH=/data/vault-index.db
       - PORT=3000
       - API_TOKEN=${API_TOKEN}
+      # Webhooks config persists on the sqlite-data volume (NOT synced to Obsidian devices).
+      - WEBHOOKS_CONFIG_PATH=/data/webhooks.json
+      # Strict SSRF protection by default; set to true only to allow private/internal targets.
+      - WEBHOOK_ALLOW_PRIVATE=${WEBHOOK_ALLOW_PRIVATE:-false}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"

@@ -5,6 +5,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
 const { db: vaultDb } = require('./vault-indexer');
+const webhooks = require('./webhooks');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -895,6 +896,65 @@ app.get('/api/sync/status', (req, res) => {
     res.json({ status: result.stdout || '' });
   } catch (error) {
     res.json({ status: 'error', error: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Webhooks: notify external systems when vault files change.
+// Creation/mutation lives here (behind the API token). The MCP layer is
+// read-only and can only list webhooks. Secrets are never returned.
+// ---------------------------------------------------------------------------
+
+// List all configured webhooks
+app.get('/api/webhooks', (req, res) => {
+  res.json({ webhooks: webhooks.list() });
+});
+
+// Get a single webhook
+app.get('/api/webhooks/:id', (req, res) => {
+  const wh = webhooks.get(req.params.id);
+  if (!wh) return res.status(404).json({ error: 'Webhook not found' });
+  res.json(wh);
+});
+
+// Create a webhook
+app.post('/api/webhooks', async (req, res) => {
+  try {
+    const wh = await webhooks.create(req.body || {});
+    res.status(201).json(wh);
+  } catch (err) {
+    if (err instanceof webhooks.ValidationError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update a webhook (only supplied fields change)
+app.patch('/api/webhooks/:id', async (req, res) => {
+  try {
+    const wh = await webhooks.update(req.params.id, req.body || {});
+    if (!wh) return res.status(404).json({ error: 'Webhook not found' });
+    res.json(wh);
+  } catch (err) {
+    if (err instanceof webhooks.ValidationError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a webhook
+app.delete('/api/webhooks/:id', (req, res) => {
+  const ok = webhooks.remove(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Webhook not found' });
+  res.json({ success: true });
+});
+
+// Fire a test delivery for a webhook
+app.post('/api/webhooks/:id/test', async (req, res) => {
+  try {
+    const result = await webhooks.testDeliver(req.params.id);
+    if (result === null) return res.status(404).json({ error: 'Webhook not found' });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

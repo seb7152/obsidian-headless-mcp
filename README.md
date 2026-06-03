@@ -28,7 +28,7 @@ Synchronizes your vault from the command line using Obsidian Sync (end-to-end en
 REST API wrapping vault file operations. All endpoints require `Authorization: Bearer <API_TOKEN>` except `/health`. Exposed at `https://obsidian-api.DOMAIN`.
 
 ### 4. **Vault Indexer** (Node.js)
-Embedded SQLite index kept in sync with the vault via a file watcher. Indexes frontmatter, tags, and tasks from every `.md` file. Queried via `POST /api/query`.
+Embedded SQLite index kept in sync with the vault via a file watcher. Indexes frontmatter, tags, and tasks from every `.md` file. Queried via `POST /api/query`. The same watcher drives **webhooks**, POSTing to external URLs when files change (see [Webhooks](#webhooks)).
 
 ### 5. **MCP Server** (Python)
 Model Context Protocol server exposing the vault as tools and resources to AI models. Exposed at `https://mcp.DOMAIN`.
@@ -335,6 +335,67 @@ Returns the contents of `agent.md`, which can hold instructions or context for A
 | `POST` | `/api/sync` | Trigger a vault sync with Obsidian Sync |
 | `GET` | `/api/sync/status` | Get current sync status |
 
+### Webhooks
+
+Notify external systems (n8n, Zapier, your own service…) whenever vault files change. The embedded watcher detects `add` / `change` / `unlink` on `.md` files and POSTs a JSON payload to your URL. Webhooks are **created and managed only through the REST API** — the MCP server can list them but never create them.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/webhooks` | List all configured webhooks (secrets redacted) |
+| `GET` | `/api/webhooks/{id}` | Get a single webhook |
+| `POST` | `/api/webhooks` | Create a webhook |
+| `PATCH` | `/api/webhooks/{id}` | Update a webhook (only supplied fields change) |
+| `DELETE` | `/api/webhooks/{id}` | Delete a webhook |
+| `POST` | `/api/webhooks/{id}/test` | Fire a test delivery and return the result |
+
+**Webhook fields** (all optional except `url`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `url` | string | **Required.** Destination URL. Must be public `https://` by default (see SSRF note below). |
+| `name` | string | Friendly label. |
+| `folder` | string \| null | Directory filter — matches every file beneath it. Wildcards allowed in segments, e.g. `20_Projects/*/notes`. `null`/omitted = whole vault. |
+| `frontmatter` | object \| null | Subset match on frontmatter, e.g. `{"type":"action"}`. Every key must be present and equal. `null`/omitted = any. |
+| `events` | string[] | Subset of `add`, `change`, `unlink`. Default: all three. |
+| `secret` | string | If set, each delivery is signed: `X-Obsidian-Signature: sha256=<hmac>` (HMAC-SHA256 of the JSON body). Never returned by the API. |
+| `include_body` | boolean | Include the file body in the payload. Default `false` (metadata only). |
+| `enabled` | boolean | Set `false` to pause delivery. Default `true`. |
+
+**Delivery payload:**
+```json
+{
+  "event": "change",
+  "path": "20_Projects/alpha/notes/idea.md",
+  "frontmatter": { "type": "action", "status": "todo" },
+  "timestamp": "2026-06-03T10:00:00.000Z",
+  "webhook_id": "wh_…",
+  "body": "…"
+}
+```
+`body` is included only when `include_body=true`. Headers: `X-Obsidian-Event: <event>` and, when a secret is set, `X-Obsidian-Signature`. Deliveries run off the watcher with a per-request timeout, bounded concurrency, and exponential-backoff retries (on network errors / 5xx / 429).
+
+```bash
+# Create a webhook for "action" notes under 20_Projects, signed
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://hooks.example.com/obsidian","folder":"20_Projects","frontmatter":{"type":"action"},"secret":"s3cr3t"}' \
+  https://obsidian-api.yourdomain.com/api/webhooks
+# → {"id":"wh_…","url":"…","folder":"20_Projects","frontmatter":{"type":"action"},"events":["add","change","unlink"],"has_secret":true,...}
+
+# List webhooks
+curl -H "Authorization: Bearer $TOKEN" https://obsidian-api.yourdomain.com/api/webhooks
+
+# Send a test delivery
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/webhooks/wh_…/test
+# → {"ok":true,"status":200,"attempts":1}
+```
+
+**Configuration & persistence**
+
+- The config is stored at `/data/webhooks.json` (the `sqlite-data` Docker volume), so it survives restarts and is **not** synced to your Obsidian devices. Override with `WEBHOOKS_CONFIG_PATH`.
+- `WEBHOOK_ALLOW_PRIVATE` (default `false`): by default the server **blocks SSRF** — only public `https://` targets are allowed; loopback, private, link-local and cloud-metadata addresses (and `http://`) are rejected, redirects are not followed, and the target is re-checked before each delivery (anti DNS-rebinding). Set it to `true` only if your receiver lives on a private/internal address (e.g. a self-hosted n8n on the same network).
+
 ---
 
 ## MCP Server
@@ -389,6 +450,7 @@ Two methods are supported — use whichever your client supports:
 | `write_file(file_path, content)` | Write or create a file (full replace) |
 | `append_to_file(file_path, content)` | Append content at end of file |
 | `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found |
+| `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically |
 
 #### Frontmatter
 
@@ -418,6 +480,12 @@ Two methods are supported — use whichever your client supports:
 |------|-------------|
 | `sync_vault()` | Trigger vault sync with Obsidian Sync |
 | `get_sync_status()` | Get current sync status |
+
+#### Webhooks (read-only)
+
+| Tool | Description |
+|------|-------------|
+| `list_webhooks()` | List active vault-change webhooks (secrets redacted). Webhooks are created/managed via the REST API, not from MCP. |
 
 ---
 
@@ -454,6 +522,7 @@ Two methods are supported — use whichever your client supports:
 - `API_TOKEN` is shared between the REST API and MCP server; all non-health endpoints are protected
 - Obsidian Sync provides end-to-end encryption for vault data at rest
 - Directory traversal is blocked server-side on all file endpoints
+- **Webhooks**: created only via the authenticated REST API (never from MCP); the config lives outside the synced vault (`/data/webhooks.json`); secrets are stored server-side and redacted in all API/MCP responses. SSRF is blocked by default — only public `https://` targets are allowed, redirects are not followed, and the destination is re-validated before every delivery. Loosen this only via `WEBHOOK_ALLOW_PRIVATE=true` for trusted internal receivers.
 
 ---
 
@@ -463,7 +532,10 @@ Two methods are supported — use whichever your client supports:
 Express REST API server. Handles file reads/writes, frontmatter parsing (js-yaml), search (grep + fuzzy), directory listing, wikilink resolution, and SQL queries via the vault indexer.
 
 ### `vault-indexer.js`
-SQLite indexer (better-sqlite3). Bootstraps a full index on first start, then keeps it live via a chokidar file watcher. Indexes frontmatter, tags, and tasks from every `.md` file.
+SQLite indexer (better-sqlite3). Bootstraps a full index on first start, then keeps it live via a chokidar file watcher. Indexes frontmatter, tags, and tasks from every `.md` file. Each `add`/`change`/`unlink` also fans out to the webhook dispatcher.
+
+### `webhooks.js`
+Webhook configuration, matching, and delivery. Persists webhooks to `/data/webhooks.json` (atomic writes), filters changes by folder glob and frontmatter subset, and POSTs signed payloads with bounded concurrency, timeouts, retries, and SSRF protection. Created/managed via the REST API; listed read-only via MCP.
 
 ### `obsidian_mcp.py`
 FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes `TokenAuthMiddleware` supporting both URL-path and Bearer-header authentication.

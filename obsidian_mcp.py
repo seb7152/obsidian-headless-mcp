@@ -343,6 +343,41 @@ def patch_file(file_path: str, old_text: str, new_text: str, replace_all: bool =
 
 
 @mcp.tool()
+def move_file(file_path: str, destination: str) -> str:
+    """Move (or rename) a file within the vault.
+
+    Renames `file_path` to `destination`, both relative to the vault root. Any
+    missing parent folders in the destination are created automatically. Use this
+    to relocate a note to another folder or to rename it (move to a new name in
+    the same folder).
+
+    Args:
+        file_path: Current path relative to vault root (e.g., '00_Inbox/idea.md')
+        destination: New path relative to vault root (e.g., '20_Projects/Alpha/idea.md')
+    """
+    try:
+        response = api_client.post(
+            f"{OBSIDIAN_API_URL}/file/{file_path}/move",
+            json={"destination": destination}
+        )
+
+        if response.status_code == 404:
+            return f"File not found: {file_path}"
+        if response.status_code == 400:
+            return f"Invalid move request: {response.json().get('error', 'bad request')}"
+        if response.status_code == 403:
+            return f"Access denied: {response.json().get('error', 'path outside vault')}"
+
+        response.raise_for_status()
+        data = response.json()
+        return f"Moved {data.get('from', file_path)} → {data.get('to', destination)}"
+    except httpx.HTTPStatusError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def query_vault(sql: str) -> str:
     """Execute a SQL SELECT query against the vault index.
 
@@ -492,6 +527,18 @@ def get_sync_status() -> str:
         return str(data.get("status", "Unknown status"))
     except Exception as e:
         return f"Error getting sync status: {e}"
+
+@mcp.tool()
+def list_webhooks() -> str:
+    """List active vault-change webhooks (read-only; secrets are redacted).
+
+    Webhooks are created and managed through the REST API, not from MCP."""
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/webhooks")
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error listing webhooks: {e}"
 
 # ==================== RUN ====================
 
