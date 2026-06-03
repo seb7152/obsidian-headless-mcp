@@ -371,6 +371,7 @@ Notify external systems (n8n, Zapier, your own service…) whenever vault files 
 | `name` | string | Friendly label. |
 | `folder` | string \| null | Directory filter — matches every file beneath it. Wildcards allowed in segments, e.g. `20_Projects/*/notes`. `null`/omitted = whole vault. |
 | `frontmatter` | object \| null | Subset match on frontmatter, e.g. `{"type":"action"}`. Every key must be present and equal. `null`/omitted = any. |
+| `frontmatter_not` | object \| null | Negated match: **skip** delivery if any of these key=value pairs match, e.g. `{"last_write_origin":"todoist"}`. A missing field never matches (so it passes). Useful to break webhook loops. `null`/omitted = no exclusion. |
 | `events` | string[] | Subset of `add`, `change`, `unlink`. Default: all three. |
 | `secret` | string | If set, each delivery is signed: `X-Obsidian-Signature: sha256=<hmac>` (HMAC-SHA256 of the JSON body). Never returned by the API. |
 | `include_body` | boolean | Include the file body in the payload. Default `false` (metadata only). |
@@ -396,6 +397,12 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   -d '{"url":"https://hooks.example.com/obsidian","folder":"20_Projects","frontmatter":{"type":"action"},"secret":"s3cr3t"}' \
   https://obsidian-api.yourdomain.com/api/webhooks
 # → {"id":"wh_…","url":"…","folder":"20_Projects","frontmatter":{"type":"action"},"events":["add","change","unlink"],"has_secret":true,...}
+
+# Combined filter: type == action AND last_write_origin != todoist (loop-breaking)
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://hooks.example.com/obsidian","frontmatter":{"type":"action"},"frontmatter_not":{"last_write_origin":"todoist"}}' \
+  https://obsidian-api.yourdomain.com/api/webhooks
 
 # List webhooks
 curl -H "Authorization: Bearer $TOKEN" https://obsidian-api.yourdomain.com/api/webhooks

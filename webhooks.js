@@ -195,6 +195,17 @@ function matchesFrontmatter(filter, fm) {
   return true;
 }
 
+// Negated subset: emit only if NONE of these key=value pairs match (e.g.
+// last_write_origin != todoist). A missing field never matches, so it passes.
+function matchesFrontmatterNot(filter, fm) {
+  if (!filter || typeof filter !== 'object') return true;
+  fm = fm || {};
+  for (const [k, v] of Object.entries(filter)) {
+    if (valueMatches(fm[k], v)) return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // CRUD
 // ---------------------------------------------------------------------------
@@ -255,6 +266,15 @@ async function normalizeInput(input, existing) {
     out.frontmatter = input.frontmatter || null;
   } else if (!existing) {
     out.frontmatter = null;
+  }
+
+  if (input.frontmatter_not !== undefined) {
+    if (input.frontmatter_not !== null && (typeof input.frontmatter_not !== 'object' || Array.isArray(input.frontmatter_not))) {
+      throw new ValidationError('"frontmatter_not" must be an object or null');
+    }
+    out.frontmatter_not = input.frontmatter_not || null;
+  } else if (!existing) {
+    out.frontmatter_not = null;
   }
 
   if (input.events !== undefined) {
@@ -391,6 +411,7 @@ function dispatch(event, { relPath, frontmatter, body } = {}) {
     if (!(wh.events || VALID_EVENTS).includes(event)) continue;
     if (!compileMatcher(wh.folder)(rel)) continue;
     if (!matchesFrontmatter(wh.frontmatter, frontmatter)) continue;
+    if (!matchesFrontmatterNot(wh.frontmatter_not, frontmatter)) continue;
 
     const payload = {
       event,
@@ -433,5 +454,5 @@ module.exports = {
   assertUrlAllowed,
   ValidationError,
   // exposed for unit tests
-  _internal: { compileMatcher, matchesFrontmatter, isPrivateIp, validateUrlSyntax, globToRegExp }
+  _internal: { compileMatcher, matchesFrontmatter, matchesFrontmatterNot, isPrivateIp, validateUrlSyntax, globToRegExp }
 };

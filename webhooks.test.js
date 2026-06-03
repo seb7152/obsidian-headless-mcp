@@ -15,7 +15,7 @@ process.env.WEBHOOKS_CONFIG_PATH = TMP_CONFIG;
 // Keep default strict SSRF (WEBHOOK_ALLOW_PRIVATE unset == false).
 
 const webhooks = require('./webhooks');
-const { compileMatcher, matchesFrontmatter, isPrivateIp, validateUrlSyntax } = webhooks._internal;
+const { compileMatcher, matchesFrontmatter, matchesFrontmatterNot, isPrivateIp, validateUrlSyntax } = webhooks._internal;
 
 test.after(() => {
   try { fs.unlinkSync(TMP_CONFIG); } catch {}
@@ -70,6 +70,24 @@ test('frontmatter matcher: subset equality', () => {
 test('frontmatter matcher: array fields match if value is contained', () => {
   assert.equal(matchesFrontmatter({ tags: 'work' }, { tags: ['home', 'work'] }), true);
   assert.equal(matchesFrontmatter({ tags: 'gym' }, { tags: ['home', 'work'] }), false);
+});
+
+test('frontmatter_not matcher: excludes when a pair matches, passes otherwise', () => {
+  const NOT = { last_write_origin: 'todoist' };
+  assert.equal(matchesFrontmatterNot(NOT, { last_write_origin: 'todoist' }), false); // excluded
+  assert.equal(matchesFrontmatterNot(NOT, { last_write_origin: 'obsidian' }), true);
+  assert.equal(matchesFrontmatterNot(NOT, {}), true);                                // missing field passes
+  assert.equal(matchesFrontmatterNot(null, { last_write_origin: 'todoist' }), true); // no filter passes
+});
+
+test('frontmatter + frontmatter_not together: type==action AND origin!=todoist', () => {
+  const yes = { type: 'action', last_write_origin: 'obsidian' };
+  const no1 = { type: 'action', last_write_origin: 'todoist' }; // excluded by NOT
+  const no2 = { type: 'note',   last_write_origin: 'obsidian' }; // fails the positive filter
+  const pass = (fm) => matchesFrontmatter({ type: 'action' }, fm) && matchesFrontmatterNot({ last_write_origin: 'todoist' }, fm);
+  assert.equal(pass(yes), true);
+  assert.equal(pass(no1), false);
+  assert.equal(pass(no2), false);
 });
 
 // ---------------------------------------------------------------------------
