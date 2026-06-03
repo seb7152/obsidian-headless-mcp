@@ -160,13 +160,23 @@ function fullReindex() {
 }
 
 function startWatcher() {
+  // inotify events often do not propagate across Docker bind mounts (common on
+  // VPS hosts), which would silently break live indexing AND webhooks. Allow
+  // forcing polling via CHOKIDAR_USEPOLLING (the docker-compose sets it true).
+  const watchOptions = {
+    ignored: /[\/\\]\./,
+    ignoreInitial: true,
+    persistent: true,
+    awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 }
+  };
+  if (process.env.CHOKIDAR_USEPOLLING !== undefined) {
+    const v = String(process.env.CHOKIDAR_USEPOLLING).toLowerCase();
+    watchOptions.usePolling = v === '1' || v === 'true';
+    watchOptions.interval = Number(process.env.CHOKIDAR_INTERVAL || 1000);
+  }
+
   chokidar
-    .watch(path.join(VAULT_PATH, '**/*.md'), {
-      ignored: /[\/\\]\./,
-      ignoreInitial: true,
-      persistent: true,
-      awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 }
-    })
+    .watch(path.join(VAULT_PATH, '**/*.md'), watchOptions)
     .on('add', (fp) => {
       const r = indexFile(fp);
       if (r) webhooks.dispatch('add', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
@@ -181,7 +191,7 @@ function startWatcher() {
       removeFile(fp);
       webhooks.dispatch('unlink', { relPath: rel, frontmatter });
     });
-  console.log('[indexer] Watching for changes…');
+  console.log(`[indexer] Watching for changes… (polling: ${watchOptions.usePolling ? 'on' : 'off'})`);
 }
 
 // Bootstrap: full reindex only if DB is empty

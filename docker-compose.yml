@@ -64,6 +64,10 @@ services:
       - WEBHOOK_ALLOW_PRIVATE=${WEBHOOK_ALLOW_PRIVATE:-false}
       # Permanently purge soft-deleted files from .trash/ after this many days (0 = never).
       - TRASH_RETENTION_DAYS=${TRASH_RETENTION_DAYS:-30}
+      # inotify is unreliable on Docker bind mounts (VPS hosts): poll the vault so
+      # live indexing and webhooks fire on file changes. Tune the interval as needed.
+      - CHOKIDAR_USEPOLLING=true
+      - CHOKIDAR_INTERVAL=1000
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"
