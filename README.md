@@ -177,7 +177,7 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   "https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md?hard=true"
 # → {"success":true,"deleted":"notes/my-note.md","mode":"hard"}
 ```
-Soft delete moves the file to a hidden `.trash/` folder at the vault root. That folder is **not indexed** (excluded from search/SQL like all dotfiles), and the deletion still fires the `unlink` webhook event. Empty `.trash/` periodically to reclaim space.
+Soft delete moves the file to a hidden `.trash/` folder at the vault root. That folder is **not indexed** (excluded from search/SQL like all dotfiles), and the deletion still fires the `unlink` webhook event. Trashed files are **auto-purged after `TRASH_RETENTION_DAYS` days** (default `30`; set to `0` to keep them forever) — the purge runs on startup and once a day, ageing files from when they were trashed.
 
 **Check broken wikilinks**
 ```bash

@@ -62,6 +62,8 @@ services:
       - WEBHOOKS_CONFIG_PATH=/data/webhooks.json
       # Strict SSRF protection by default; set to true only to allow private/internal targets.
       - WEBHOOK_ALLOW_PRIVATE=${WEBHOOK_ALLOW_PRIVATE:-false}
+      # Permanently purge soft-deleted files from .trash/ after this many days (0 = never).
+      - TRASH_RETENTION_DAYS=${TRASH_RETENTION_DAYS:-30}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"
