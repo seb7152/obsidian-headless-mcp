@@ -5,6 +5,7 @@ const chokidar = require('chokidar');
 const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
+const webhooks = require('./webhooks');
 
 const VAULT_PATH = process.env.VAULT_PATH || '/vault';
 const SQLITE_PATH = process.env.SQLITE_PATH || '/data/vault-index.db';
@@ -111,6 +112,8 @@ const doIndex = db.transaction((rel, fm, tags, tasks, title, created, modified) 
 
 // -- Public API --
 
+// Returns { rel, frontmatter, body } so callers (e.g. the watcher) can reuse
+// the already-parsed file instead of reading it again. Returns null on failure.
 function indexFile(filePath) {
   try {
     const rel = path.relative(VAULT_PATH, filePath);
@@ -126,13 +129,27 @@ function indexFile(filePath) {
       normalizeDate(fm.created),
       normalizeDate(fm.modified) || normalizeDate(stat.mtime)
     );
+    return { rel, frontmatter: fm, body };
   } catch (err) {
     console.error(`[indexer] Failed to index ${filePath}: ${err.message}`);
+    return null;
   }
 }
 
+const stmtGetFrontmatter = db.prepare(`SELECT frontmatter FROM files WHERE path = ?`);
+
 function removeFile(filePath) {
   stmtDeleteFile.run(path.relative(VAULT_PATH, filePath));
+}
+
+// Last-known frontmatter from the index (the file is already gone on unlink).
+function lastKnownFrontmatter(rel) {
+  try {
+    const row = stmtGetFrontmatter.get(rel);
+    return row ? JSON.parse(row.frontmatter) : {};
+  } catch {
+    return {};
+  }
 }
 
 function fullReindex() {
@@ -150,9 +167,20 @@ function startWatcher() {
       persistent: true,
       awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 }
     })
-    .on('add', indexFile)
-    .on('change', indexFile)
-    .on('unlink', removeFile);
+    .on('add', (fp) => {
+      const r = indexFile(fp);
+      if (r) webhooks.dispatch('add', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
+    })
+    .on('change', (fp) => {
+      const r = indexFile(fp);
+      if (r) webhooks.dispatch('change', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
+    })
+    .on('unlink', (fp) => {
+      const rel = path.relative(VAULT_PATH, fp);
+      const frontmatter = lastKnownFrontmatter(rel); // read before deleting from index
+      removeFile(fp);
+      webhooks.dispatch('unlink', { relPath: rel, frontmatter });
+    });
   console.log('[indexer] Watching for changes…');
 }
 

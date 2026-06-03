@@ -5,6 +5,7 @@ const path = require('path');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
 const { db: vaultDb } = require('./vault-indexer');
+const webhooks = require('./webhooks');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -470,6 +471,44 @@ app.post(/^\/api\/file\/(.+)\/move$/, (req, res) => {
   }
 });
 
+// Delete a single file (DELETE). Soft-deletes by default (moves to the hidden,
+// non-indexed `.trash/` folder, recoverable); pass ?hard=true to remove permanently.
+app.delete(/^\/api\/file\/(.+)$/, (req, res) => {
+  try {
+    const rel = req.params[0];
+    const filePath = path.join(VAULT_PATH, rel);
+    if (!filePath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied' });
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+    if (!fs.statSync(filePath).isFile()) return res.status(400).json({ error: 'Not a file' });
+
+    const hard = req.query.hard === 'true' || req.query.hard === '1' || (req.body && req.body.hard === true);
+
+    if (hard) {
+      fs.unlinkSync(filePath);
+      return res.json({ success: true, deleted: rel, mode: 'hard' });
+    }
+
+    // Soft delete: move into `.trash/`, preserving the relative path. If a file
+    // is already trashed there, suffix with a timestamp to avoid clobbering it.
+    let trashRel = path.join('.trash', rel);
+    let trashPath = path.join(VAULT_PATH, trashRel);
+    if (fs.existsSync(trashPath)) {
+      const ext = path.extname(rel);
+      trashRel = path.join('.trash', `${rel.slice(0, rel.length - ext.length)}.${Date.now()}${ext}`);
+      trashPath = path.join(VAULT_PATH, trashRel);
+    }
+    fs.mkdirSync(path.dirname(trashPath), { recursive: true });
+    fs.renameSync(filePath, trashPath);
+    // Stamp mtime to "now" so auto-purge ages files from when they were trashed,
+    // not from their last content edit.
+    const now = new Date();
+    try { fs.utimesSync(trashPath, now, now); } catch {}
+    res.json({ success: true, deleted: rel, mode: 'soft', trashed_to: trashRel });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Bulk move files to a destination folder
 // Body: { "paths": ["a.md", "b.md"], "destination_folder": "30_Knowledge/permanent-notes" }
 app.post('/api/files/move', (req, res) => {
@@ -898,10 +937,124 @@ app.get('/api/sync/status', (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Webhooks: notify external systems when vault files change.
+// Creation/mutation lives here (behind the API token). The MCP layer is
+// read-only and can only list webhooks. Secrets are never returned.
+// ---------------------------------------------------------------------------
+
+// List all configured webhooks
+app.get('/api/webhooks', (req, res) => {
+  res.json({ webhooks: webhooks.list() });
+});
+
+// Get a single webhook
+app.get('/api/webhooks/:id', (req, res) => {
+  const wh = webhooks.get(req.params.id);
+  if (!wh) return res.status(404).json({ error: 'Webhook not found' });
+  res.json(wh);
+});
+
+// Create a webhook
+app.post('/api/webhooks', async (req, res) => {
+  try {
+    const wh = await webhooks.create(req.body || {});
+    res.status(201).json(wh);
+  } catch (err) {
+    if (err instanceof webhooks.ValidationError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update a webhook (only supplied fields change)
+app.patch('/api/webhooks/:id', async (req, res) => {
+  try {
+    const wh = await webhooks.update(req.params.id, req.body || {});
+    if (!wh) return res.status(404).json({ error: 'Webhook not found' });
+    res.json(wh);
+  } catch (err) {
+    if (err instanceof webhooks.ValidationError) return res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a webhook
+app.delete('/api/webhooks/:id', (req, res) => {
+  const ok = webhooks.remove(req.params.id);
+  if (!ok) return res.status(404).json({ error: 'Webhook not found' });
+  res.json({ success: true });
+});
+
+// Fire a test delivery for a webhook
+app.post('/api/webhooks/:id/test', async (req, res) => {
+  try {
+    const result = await webhooks.testDeliver(req.params.id);
+    if (result === null) return res.status(404).json({ error: 'Webhook not found' });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Trash auto-purge: permanently remove soft-deleted files older than the
+// retention window. Runs on startup and on an interval. The .trash/ folder is
+// hidden, so the indexer/watcher ignore it (no webhooks fire on purge).
+// ---------------------------------------------------------------------------
+const TRASH_PATH = path.join(VAULT_PATH, '.trash');
+const TRASH_RETENTION_DAYS = Number(process.env.TRASH_RETENTION_DAYS || 30);
+const TRASH_PURGE_INTERVAL_MS = Number(process.env.TRASH_PURGE_INTERVAL_MS || 24 * 60 * 60 * 1000);
+
+function purgeTrash() {
+  if (!(TRASH_RETENTION_DAYS > 0)) return; // <= 0 disables auto-purge
+  if (!fs.existsSync(TRASH_PATH)) return;
+  const cutoff = Date.now() - TRASH_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let removed = 0;
+
+  // Recurse; returns true when `dir` is empty afterwards so the caller can rmdir it.
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    let empty = true;
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          if (walk(full)) fs.rmdirSync(full);
+          else empty = false;
+        } else if (fs.statSync(full).mtimeMs < cutoff) {
+          fs.unlinkSync(full);
+          removed++;
+        } else {
+          empty = false;
+        }
+      } catch {
+        empty = false;
+      }
+    }
+    return empty;
+  };
+
+  try {
+    walk(TRASH_PATH);
+    if (removed > 0) console.log(`[trash] Purged ${removed} file(s) older than ${TRASH_RETENTION_DAYS} days`);
+  } catch (err) {
+    console.error(`[trash] Purge failed: ${err.message}`);
+  }
+}
+
+purgeTrash();
+setInterval(purgeTrash, TRASH_PURGE_INTERVAL_MS).unref();
+
 // Start server
 app.listen(PORT, () => {
   console.log(`🚀 Obsidian API server running on port ${PORT}`);
   console.log(`📁 Vault path: ${VAULT_PATH}`);
   console.log(`🔐 Authentication: Bearer token required (except /health)`);
   console.log(`📚 Documentation: GET /api/agent/context`);
+  console.log(`🗑️  Trash retention: ${TRASH_RETENTION_DAYS > 0 ? TRASH_RETENTION_DAYS + ' days' : 'disabled'}`);
 });
