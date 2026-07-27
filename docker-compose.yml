@@ -80,13 +80,16 @@ services:
     restart: unless-stopped
     depends_on:
       - obsidian-api
-    command: python -c "import urllib.request, subprocess, sys; subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', 'mcp', 'httpx', 'uvicorn'], check=True); urllib.request.urlretrieve('https://raw.githubusercontent.com/seb7152/obsidian-headless-mcp/main/obsidian_mcp.py', '/tmp/obsidian_mcp.py'); exec(open('/tmp/obsidian_mcp.py').read())"
+    command: python -c "import urllib.request, subprocess, sys, json, base64; subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', 'mcp', 'httpx', 'uvicorn'], check=True); data=json.loads(urllib.request.urlopen('https://api.github.com/repos/seb7152/obsidian-headless-mcp/contents/obsidian_mcp.py').read()); open('/tmp/obsidian_mcp.py','w').write(base64.b64decode(data['content']).decode()); exec(open('/tmp/obsidian_mcp.py').read())"
     expose:
       - "3001"
     environment:
       - OBSIDIAN_API_URL=http://obsidian-api:3000/api
       - API_TOKEN=${API_TOKEN}
       - PORT=3001
+      - MCP_PUBLIC_URL=https://mcp.${DOMAIN}
+      - ZITADEL_ISSUER=${ZITADEL_ISSUER:-https://zitadel-k9z6.srv828065.hstgr.cloud}
+      - OAUTH_REQUIRED_ROLE=${OAUTH_REQUIRED_ROLE:-obsidian:access}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-mcp.rule=Host(`mcp.${DOMAIN}`)"

@@ -426,9 +426,10 @@ Exposes the vault as MCP tools and resources for AI agents. Base URL: `https://m
 
 ### Authentication
 
-Two methods are supported — use whichever your client supports:
+Three methods are supported, checked in this order:
 
-**1. Authorization header (recommended)**
+**1. Authorization header with the static token (recommended for Claude Code CLI / Codex CLI —
+simpler than OAuth for those clients)**
 ```json
 {
   "mcpServers": {
@@ -443,7 +444,7 @@ Two methods are supported — use whichever your client supports:
 }
 ```
 
-**2. Token in URL path (legacy)**
+**2. Token in URL path (legacy — planned for removal later)**
 ```json
 {
   "mcpServers": {
@@ -454,6 +455,28 @@ Two methods are supported — use whichever your client supports:
   }
 }
 ```
+
+**3. OAuth 2.1 + PKCE (Zitadel)** — used automatically by OAuth-aware clients like claude.ai
+when no static token is presented:
+```json
+{
+  "mcpServers": {
+    "obsidian": {
+      "url": "https://mcp.yourdomain.com",
+      "transport": "http"
+    }
+  }
+}
+```
+On first connection such a client will:
+1. Get a `401` with a `WWW-Authenticate` header pointing at `/.well-known/oauth-protected-resource`
+2. Follow that to discover the Zitadel authorization server and start the Authorization Code + PKCE flow
+3. Present you with a login/consent screen for your Zitadel account
+4. Attach the resulting access token as `Authorization: Bearer <token>` on subsequent requests
+
+For OAuth requests, access is granted only to users holding the `obsidian:access` project role
+in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (see
+[Security Notes](#security-notes)).
 
 ### Resources
 
@@ -551,6 +574,15 @@ Two methods are supported — use whichever your client supports:
 - Obsidian Sync provides end-to-end encryption for vault data at rest
 - Directory traversal is blocked server-side on all file endpoints
 - **Webhooks**: created only via the authenticated REST API (never from MCP); the config lives outside the synced vault (`/data/webhooks.json`); secrets are stored server-side and redacted in all API/MCP responses. SSRF is blocked by default — only public `https://` targets are allowed, redirects are not followed, and the destination is re-validated before every delivery. Loosen this only via `WEBHOOK_ALLOW_PRIVATE=true` for trusted internal receivers.
+- **MCP OAuth**: the MCP server (`mcp.DOMAIN`) also accepts OAuth 2.1 + PKCE via Zitadel
+  alongside the static `API_TOKEN`. For OAuth requests, every bearer token is validated
+  against Zitadel's `/oidc/v1/userinfo`, and access is denied (`403`) unless the token's
+  claims include the `obsidian:access` project role. This role check matters because
+  Zitadel doesn't support RFC 8707 resource indicators: a token issued for the shared
+  `Claude-web` client can carry an audience covering every MCP server in the `mcp-servers`
+  project, not just this one, so a valid signature alone isn't proof of authorization for
+  this specific server. The URL-path token variant is planned for removal later; the
+  static Bearer token is intended to stay alongside OAuth.
 
 ---
 
@@ -566,7 +598,10 @@ SQLite indexer (better-sqlite3). Bootstraps a full index on first start, then ke
 Webhook configuration, matching, and delivery. Persists webhooks to `/data/webhooks.json` (atomic writes), filters changes by folder glob and frontmatter subset, and POSTs signed payloads with bounded concurrency, timeouts, retries, and SSRF protection. Created/managed via the REST API; listed read-only via MCP.
 
 ### `obsidian_mcp.py`
-FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes `TokenAuthMiddleware` supporting both URL-path and Bearer-header authentication.
+FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes
+`AuthMiddleware`, which accepts either the legacy static token (URL-path or Bearer header) or
+an OAuth 2.1 access token validated against Zitadel, plus the `/.well-known/oauth-protected-resource`
+metadata endpoint required by OAuth-aware MCP clients.
 
 ## License
 
