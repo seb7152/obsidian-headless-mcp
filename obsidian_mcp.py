@@ -547,6 +547,83 @@ def run_index(file_path: str, section: str = "") -> str:
 
 
 @mcp.tool()
+def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
+    """Extract markdown checklist items (- [ ] / - [x]) from a file, as JSON.
+
+    Only lines that are actual checkbox tasks are returned — plain bullet points
+    without a checkbox are skipped. Each task includes its checked state and the
+    heading breadcrumb it falls under (e.g. "Voyage — socle > Vêtements").
+
+    Some checklists (notably vacation packing lists) embed inline bracket tags in
+    the task text, like `[if:plage]` or `[require:passeport]`, to mark conditional
+    or dependent items. Set `isolate_tags=True` to pull these out of the task text
+    into a separate `tags` field (e.g. {"if": ["plage"]}) instead of leaving them
+    inline in `text`.
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'perso/voyage.md')
+        isolate_tags: Extract inline [key:value] bracket tags into a `tags` field
+                      and strip them out of `text` (default: False — left inline)
+    """
+    import json
+    import re
+
+    checkbox_re = re.compile(r'^\s*[-*+]\s+\[([ xX])\]\s*(.*)$')
+    heading_re = re.compile(r'^(#{1,6})\s+(.*)$')
+    tag_re = re.compile(r'\[(\w+):([^\[\]]+)\]')
+
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response.raise_for_status()
+        content = response.json().get("content", "")
+
+        heading_stack = []  # list of (level, text), acts as a breadcrumb trail
+        tasks = []
+
+        for line_no, line in enumerate(content.split("\n"), start=1):
+            heading_match = heading_re.match(line)
+            if heading_match:
+                level = len(heading_match.group(1))
+                heading_stack = [h for h in heading_stack if h[0] < level]
+                heading_stack.append((level, heading_match.group(2).strip()))
+                continue
+
+            checkbox_match = checkbox_re.match(line)
+            if not checkbox_match:
+                continue
+
+            checked = checkbox_match.group(1).lower() == "x"
+            text = checkbox_match.group(2).strip()
+
+            tags = {}
+            if isolate_tags:
+                for key, value in tag_re.findall(text):
+                    tags.setdefault(key, []).append(value.strip())
+                text = tag_re.sub("", text)
+                text = re.sub(r'\s{2,}', ' ', text).strip()
+
+            tasks.append({
+                "line": line_no,
+                "text": text,
+                "checked": checked,
+                "section": " > ".join(h[1] for h in heading_stack),
+                "tags": tags,
+            })
+
+        return json.dumps({
+            "file": file_path,
+            "count": len(tasks),
+            "tasks": tasks,
+        }, ensure_ascii=False, indent=2)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return json.dumps({"error": f"File not found: {file_path}"})
+        return json.dumps({"error": f"Error reading file: {e}"})
+    except Exception as e:
+        return json.dumps({"error": f"Error: {e}"})
+
+
+@mcp.tool()
 def sync_vault() -> str:
     """Manually trigger a vault sync with Obsidian Sync service"""
     try:
