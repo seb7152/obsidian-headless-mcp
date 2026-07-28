@@ -519,7 +519,7 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 |------|-------------|
 | `query_vault(sql)` | Run a SQL `SELECT` against the vault index (same `files`/`tasks` schema as the REST API) |
 | `run_index(file_path, section)` | Execute SQL blocks embedded in a `_index.md` file; leave `section` empty to list available sections |
-| `extract_tasks(file_path, isolate_tags=False)` | Extract markdown checklist items (`- [ ]` / `- [x]`) from a file as JSON, with heading breadcrumb per item; `isolate_tags=True` pulls inline `[key:value]` tags (e.g. `[if:plage]`, `[require:passeport]`) out of `text` into a separate `tags` field |
+| `extract_tasks(file_path, isolate_tags=False)` | Extract markdown checklist items (`- [ ]` / `- [x]`) from a file as JSON, with heading breadcrumb per item; `isolate_tags=True` pulls every inline `[...]` bracket group (e.g. `[if:plage]`, `[require:passeport]`, `[urgent]` — any content, not just `key:value`) out of `text` into a separate `tags` field |
 
 #### Sync
 

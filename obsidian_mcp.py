@@ -550,27 +550,32 @@ def run_index(file_path: str, section: str = "") -> str:
 def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
     """Extract markdown checklist items (- [ ] / - [x]) from a file, as JSON.
 
-    Only lines that are actual checkbox tasks are returned — plain bullet points
-    without a checkbox are skipped. Each task includes its checked state and the
-    heading breadcrumb it falls under (e.g. "Voyage — socle > Vêtements").
+    Only lines matching Obsidian's checkbox syntax — `- [ ]` (unchecked) or
+    `- [x]` / `- [X]` (checked) — are returned; plain bullet points without a
+    checkbox are skipped. Each task carries `checkbox: true` (marking it as a
+    checklist item) and `checked` (its ticked state), plus its heading
+    breadcrumb (e.g. "Voyage — socle > Vêtements").
 
-    Some checklists (notably vacation packing lists) embed inline bracket tags in
-    the task text, like `[if:plage]` or `[require:passeport]`, to mark conditional
-    or dependent items. Set `isolate_tags=True` to pull these out of the task text
-    into a separate `tags` field (e.g. {"if": ["plage"]}) instead of leaving them
-    inline in `text`.
+    Some checklists (notably vacation packing lists) embed extra bracket tags in
+    the task text, e.g. `[if:plage]`, `[require:passeport]`, or arbitrary other
+    content in `[...]` — the content isn't limited to a fixed set of keywords.
+    Set `isolate_tags=True` to pull every such bracket group out of the task text
+    into a separate `tags` field instead of leaving it inline in `text`. Each tag
+    is returned as `{"raw": "...", "key": "...", "value": "..."}`, split on the
+    first `:` when present (`key`/`value` are null for a bracket with no `:`,
+    e.g. `[urgent]`).
 
     Args:
         file_path: Path to the file relative to vault root (e.g., 'perso/voyage.md')
-        isolate_tags: Extract inline [key:value] bracket tags into a `tags` field
-                      and strip them out of `text` (default: False — left inline)
+        isolate_tags: Extract inline [...] bracket tags into a `tags` field and
+                      strip them out of `text` (default: False — left inline)
     """
     import json
     import re
 
-    checkbox_re = re.compile(r'^\s*[-*+]\s+\[([ xX])\]\s*(.*)$')
+    checkbox_re = re.compile(r'^\s*-\s+\[([ xX])\]\s*(.*)$')
     heading_re = re.compile(r'^(#{1,6})\s+(.*)$')
-    tag_re = re.compile(r'\[(\w+):([^\[\]]+)\]')
+    tag_re = re.compile(r'\[([^\[\]]+)\]')
 
     try:
         response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
@@ -595,17 +600,24 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
             checked = checkbox_match.group(1).lower() == "x"
             text = checkbox_match.group(2).strip()
 
-            tags = {}
+            tags = []
             if isolate_tags:
-                for key, value in tag_re.findall(text):
-                    tags.setdefault(key, []).append(value.strip())
+                for raw in tag_re.findall(text):
+                    raw = raw.strip()
+                    if ":" in raw:
+                        key, value = raw.split(":", 1)
+                        key, value = key.strip(), value.strip()
+                    else:
+                        key, value = None, None
+                    tags.append({"raw": raw, "key": key, "value": value})
                 text = tag_re.sub("", text)
                 text = re.sub(r'\s{2,}', ' ', text).strip()
 
             tasks.append({
                 "line": line_no,
-                "text": text,
+                "checkbox": True,
                 "checked": checked,
+                "text": text,
                 "section": " > ".join(h[1] for h in heading_stack),
                 "tags": tags,
             })
