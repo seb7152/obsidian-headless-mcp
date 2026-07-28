@@ -80,7 +80,7 @@ services:
     restart: unless-stopped
     depends_on:
       - obsidian-api
-    command: python -c "import urllib.request, subprocess, sys, json, base64; subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', 'mcp', 'httpx', 'uvicorn'], check=True); data=json.loads(urllib.request.urlopen('https://api.github.com/repos/seb7152/obsidian-headless-mcp/contents/obsidian_mcp.py').read()); open('/tmp/obsidian_mcp.py','w').write(base64.b64decode(data['content']).decode()); exec(open('/tmp/obsidian_mcp.py').read())"
+    command: python -c "import urllib.request, subprocess, sys, json, base64; subprocess.run([sys.executable, '-m', 'pip', 'install', '--quiet', 'mcp<2', 'httpx', 'uvicorn'], check=True); data=json.loads(urllib.request.urlopen('https://api.github.com/repos/seb7152/obsidian-headless-mcp/contents/obsidian_mcp.py').read()); open('/tmp/obsidian_mcp.py','w').write(base64.b64decode(data['content']).decode()); exec(open('/tmp/obsidian_mcp.py').read())"
     expose:
       - "3001"
     environment:
