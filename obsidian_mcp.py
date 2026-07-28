@@ -552,29 +552,24 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
 
     Only lines matching Obsidian's checkbox syntax — `- [ ]` (unchecked) or
     `- [x]` / `- [X]` (checked) — are returned; plain bullet points without a
-    checkbox are skipped. Each task carries `checkbox: true` (marking it as a
-    checklist item) and `checked` (its ticked state), plus its heading
-    breadcrumb (e.g. "Voyage — socle > Vêtements").
+    checkbox are skipped. Each task is `{"checked": bool, "text": str, "tags": [...]}`.
 
     Some checklists (notably vacation packing lists) embed extra bracket tags in
-    the task text, e.g. `[if:plage]`, `[require:passeport]`, or arbitrary other
-    content in `[...]` — the content isn't limited to a fixed set of keywords.
-    Set `isolate_tags=True` to pull every such bracket group out of the task text
-    into a separate `tags` field instead of leaving it inline in `text`. Each tag
-    is returned as `{"raw": "...", "key": "...", "value": "..."}`, split on the
-    first `:` when present (`key`/`value` are null for a bracket with no `:`,
-    e.g. `[urgent]`).
+    the task text, e.g. `[if:plage]`, `[require:passeport]` — any content in
+    `[...]`, not limited to a fixed set of keywords. Set `isolate_tags=True` to
+    pull every such bracket group out of the task text into the `tags` array
+    (as raw strings, e.g. `["if:plage", "require:passeport"]`) instead of
+    leaving it inline in `text`.
 
     Args:
         file_path: Path to the file relative to vault root (e.g., 'perso/voyage.md')
-        isolate_tags: Extract inline [...] bracket tags into a `tags` field and
+        isolate_tags: Extract inline [...] bracket tags into the `tags` array and
                       strip them out of `text` (default: False — left inline)
     """
     import json
     import re
 
     checkbox_re = re.compile(r'^\s*-\s+\[([ xX])\]\s*(.*)$')
-    heading_re = re.compile(r'^(#{1,6})\s+(.*)$')
     tag_re = re.compile(r'\[([^\[\]]+)\]')
 
     try:
@@ -582,17 +577,9 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
         response.raise_for_status()
         content = response.json().get("content", "")
 
-        heading_stack = []  # list of (level, text), acts as a breadcrumb trail
         tasks = []
 
-        for line_no, line in enumerate(content.split("\n"), start=1):
-            heading_match = heading_re.match(line)
-            if heading_match:
-                level = len(heading_match.group(1))
-                heading_stack = [h for h in heading_stack if h[0] < level]
-                heading_stack.append((level, heading_match.group(2).strip()))
-                continue
-
+        for line in content.split("\n"):
             checkbox_match = checkbox_re.match(line)
             if not checkbox_match:
                 continue
@@ -602,31 +589,17 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
 
             tags = []
             if isolate_tags:
-                for raw in tag_re.findall(text):
-                    raw = raw.strip()
-                    if ":" in raw:
-                        key, value = raw.split(":", 1)
-                        key, value = key.strip(), value.strip()
-                    else:
-                        key, value = None, None
-                    tags.append({"raw": raw, "key": key, "value": value})
+                tags = [t.strip() for t in tag_re.findall(text)]
                 text = tag_re.sub("", text)
                 text = re.sub(r'\s{2,}', ' ', text).strip()
 
             tasks.append({
-                "line": line_no,
-                "checkbox": True,
                 "checked": checked,
                 "text": text,
-                "section": " > ".join(h[1] for h in heading_stack),
                 "tags": tags,
             })
 
-        return json.dumps({
-            "file": file_path,
-            "count": len(tasks),
-            "tasks": tasks,
-        }, ensure_ascii=False, indent=2)
+        return json.dumps({"tasks": tasks}, ensure_ascii=False, indent=2)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return json.dumps({"error": f"File not found: {file_path}"})
