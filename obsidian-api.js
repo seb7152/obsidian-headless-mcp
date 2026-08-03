@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
-const { db: vaultDb } = require('./vault-indexer');
+const { db: vaultDb, getIndexerStatus } = require('./vault-indexer');
 const webhooks = require('./webhooks');
 
 const app = express();
@@ -1071,12 +1071,34 @@ app.post('/api/sync', (req, res) => {
 
 // Get sync status
 app.get('/api/sync/status', (req, res) => {
+  const response = { status: '' };
+
   try {
     const result = spawnSync('ob', ['sync', '--vault-name', process.env.VAULT_NAME || 'Vault', '--status'], { encoding: 'utf-8' });
-    res.json({ status: result.stdout || '' });
+    response.status = result.stdout || '';
   } catch (error) {
-    res.json({ status: 'error', error: error.message });
+    response.status = 'error';
+    response.error = error.message;
   }
+
+  // SQLite index / watcher status — surfaced here too because the watcher has
+  // silently stopped picking up changes before (e.g. inotify not propagating
+  // across Docker bind mounts), leaving the index stale without any error.
+  try {
+    const indexer = getIndexerStatus();
+    const vaultFileCount = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
+      .stdout.split('\n').filter(f => f).length;
+
+    response.indexer = {
+      ...indexer,
+      vault_file_count: vaultFileCount,
+      in_sync: indexer.db_file_count === vaultFileCount
+    };
+  } catch (error) {
+    response.indexer = { error: error.message };
+  }
+
+  res.json(response);
 });
 
 // ---------------------------------------------------------------------------
