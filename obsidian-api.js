@@ -692,6 +692,148 @@ app.patch('/api/files/batch', (req, res) => {
   res.json({ results, count: results.length, failed_count: failed.length });
 });
 
+// Create one or more folders (and any missing parent folders) in a single call —
+// used to scaffold a directory structure (e.g. a project skeleton with subfolders).
+// Body: { "paths": ["20_Projects/Alpha", "20_Projects/Alpha/Docs"] }
+app.post('/api/folders', (req, res) => {
+  const { paths } = req.body || {};
+
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  }
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
+
+  const results = paths.map(relativePath => {
+    try {
+      const dirPath = path.join(VAULT_PATH, relativePath);
+      if (!dirPath.startsWith(VAULT_PREFIX)) {
+        return { path: relativePath, error: 'Access denied' };
+      }
+
+      const alreadyExisted = fs.existsSync(dirPath);
+      if (alreadyExisted && !fs.statSync(dirPath).isDirectory()) {
+        return { path: relativePath, error: 'A file already exists at this path' };
+      }
+
+      fs.mkdirSync(dirPath, { recursive: true });
+      return { path: relativePath, success: true, already_existed: alreadyExisted };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
+// Delete one or more folders (batch), recursively. Soft-deletes by default (moves
+// each folder tree into the hidden `.trash/` folder, recoverable); pass ?hard=true
+// (or { "hard": true } in the body) to remove permanently. Mirrors the semantics
+// of the single-file DELETE /api/file/{path} route.
+// Body: { "paths": ["20_Projects/Alpha", "20_Projects/Beta"] }
+app.delete('/api/folders', (req, res) => {
+  const { paths } = req.body || {};
+
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  }
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
+
+  const hard = req.query.hard === 'true' || req.query.hard === '1' || (req.body && req.body.hard === true);
+
+  const results = paths.map(relativePath => {
+    try {
+      const dirPath = path.join(VAULT_PATH, relativePath);
+      if (!dirPath.startsWith(VAULT_PREFIX)) {
+        return { path: relativePath, error: 'Access denied' };
+      }
+      if (dirPath === VAULT_PATH) {
+        return { path: relativePath, error: 'Cannot delete the vault root' };
+      }
+      if (!fs.existsSync(dirPath)) {
+        return { path: relativePath, error: 'Folder not found' };
+      }
+      if (!fs.statSync(dirPath).isDirectory()) {
+        return { path: relativePath, error: 'Not a folder' };
+      }
+
+      if (hard) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        return { path: relativePath, success: true, mode: 'hard' };
+      }
+
+      // Soft delete: move the whole folder tree into `.trash/`, preserving the
+      // relative path. Suffix with a timestamp if something is already trashed there.
+      let trashRel = path.join('.trash', relativePath);
+      let trashPath = path.join(VAULT_PATH, trashRel);
+      if (fs.existsSync(trashPath)) {
+        trashRel = path.join('.trash', `${relativePath}.${Date.now()}`);
+        trashPath = path.join(VAULT_PATH, trashRel);
+      }
+      fs.mkdirSync(path.dirname(trashPath), { recursive: true });
+      fs.renameSync(dirPath, trashPath);
+      return { path: relativePath, success: true, mode: 'soft', trashed_to: trashRel };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
+// Move/rename one or more folders (batch). Each entry is an independent {from, to}
+// pair — unlike POST /api/files/move (relocate several files into one shared
+// destination_folder), a folder move needs its own destination per entry. Any
+// missing parent folders in the destination are created automatically.
+// Body: { "moves": [{"from": "20_Projects/Alpha", "to": "20_Projects/AlphaRenamed"}] }
+app.post('/api/folders/move', (req, res) => {
+  const { moves } = req.body || {};
+
+  if (!Array.isArray(moves) || moves.length === 0) {
+    return res.status(400).json({ error: '"moves" must be a non-empty array' });
+  }
+  if (moves.length > 100) {
+    return res.status(400).json({ error: '"moves" must contain at most 100 entries' });
+  }
+
+  const results = moves.map(entry => {
+    const { from, to } = entry || {};
+    if (!from || !to) {
+      return { from, to, error: '"from" and "to" are both required' };
+    }
+
+    try {
+      const srcPath = path.join(VAULT_PATH, from);
+      const destPath = path.join(VAULT_PATH, to);
+
+      if (!srcPath.startsWith(VAULT_PREFIX)) return { from, to, error: 'Access denied: from' };
+      if (!destPath.startsWith(VAULT_PREFIX)) return { from, to, error: 'Access denied: to' };
+      if (srcPath === VAULT_PATH) return { from, to, error: 'Cannot move the vault root' };
+      if (!fs.existsSync(srcPath)) return { from, to, error: 'Folder not found' };
+      if (!fs.statSync(srcPath).isDirectory()) return { from, to, error: 'Not a folder' };
+      if (srcPath === destPath) return { from, to, error: '"from" and "to" are the same path' };
+      if (fs.existsSync(destPath)) return { from, to, error: 'Destination already exists' };
+      if ((destPath + path.sep).startsWith(srcPath + path.sep)) {
+        return { from, to, error: 'Cannot move a folder into itself' };
+      }
+
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      fs.renameSync(srcPath, destPath);
+      return { from, to, success: true };
+    } catch (err) {
+      return { from, to, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
 // List directory contents
 app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
   try {
