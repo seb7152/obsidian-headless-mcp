@@ -728,6 +728,64 @@ app.post('/api/folders', (req, res) => {
   res.json({ results, count: results.length, failed_count: failed.length });
 });
 
+// Delete one or more folders (batch), recursively. Soft-deletes by default (moves
+// each folder tree into the hidden `.trash/` folder, recoverable); pass ?hard=true
+// (or { "hard": true } in the body) to remove permanently. Mirrors the semantics
+// of the single-file DELETE /api/file/{path} route.
+// Body: { "paths": ["20_Projects/Alpha", "20_Projects/Beta"] }
+app.delete('/api/folders', (req, res) => {
+  const { paths } = req.body || {};
+
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  }
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
+
+  const hard = req.query.hard === 'true' || req.query.hard === '1' || (req.body && req.body.hard === true);
+
+  const results = paths.map(relativePath => {
+    try {
+      const dirPath = path.join(VAULT_PATH, relativePath);
+      if (!dirPath.startsWith(VAULT_PREFIX)) {
+        return { path: relativePath, error: 'Access denied' };
+      }
+      if (dirPath === VAULT_PATH) {
+        return { path: relativePath, error: 'Cannot delete the vault root' };
+      }
+      if (!fs.existsSync(dirPath)) {
+        return { path: relativePath, error: 'Folder not found' };
+      }
+      if (!fs.statSync(dirPath).isDirectory()) {
+        return { path: relativePath, error: 'Not a folder' };
+      }
+
+      if (hard) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+        return { path: relativePath, success: true, mode: 'hard' };
+      }
+
+      // Soft delete: move the whole folder tree into `.trash/`, preserving the
+      // relative path. Suffix with a timestamp if something is already trashed there.
+      let trashRel = path.join('.trash', relativePath);
+      let trashPath = path.join(VAULT_PATH, trashRel);
+      if (fs.existsSync(trashPath)) {
+        trashRel = path.join('.trash', `${relativePath}.${Date.now()}`);
+        trashPath = path.join(VAULT_PATH, trashRel);
+      }
+      fs.mkdirSync(path.dirname(trashPath), { recursive: true });
+      fs.renameSync(dirPath, trashPath);
+      return { path: relativePath, success: true, mode: 'soft', trashed_to: trashRel };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
 // List directory contents
 app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
   try {

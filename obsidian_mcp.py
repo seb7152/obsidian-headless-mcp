@@ -260,6 +260,50 @@ def create_folders(folder_paths: list) -> str:
 
 
 @mcp.tool()
+def delete_folders(folder_paths: list, hard: bool = False) -> str:
+    """Delete one or more folders from the vault, recursively.
+
+    By default this is a SOFT delete: each folder tree is moved to a hidden
+    `.trash/` folder inside the vault (not indexed, recoverable). Set
+    `hard=True` to remove them permanently instead. Processes up to 100
+    folders per call.
+
+    Args:
+        folder_paths: List of folder paths relative to vault root
+                       (e.g., ["20_Projects/Alpha", "20_Projects/Beta"])
+        hard: Permanently delete instead of moving to .trash/ (default: False)
+    """
+    try:
+        response = api_client.request(
+            "DELETE",
+            f"{OBSIDIAN_API_URL}/folders",
+            params={"hard": "true"} if hard else None,
+            json={"paths": folder_paths},
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        total = data.get("count", 0)
+
+        ok = [r for r in results if r.get("success")]
+        failed = [r for r in results if r.get("error")]
+
+        lines = [f"Folder deletion: {len(ok)}/{total} succeeded"]
+        for r in ok:
+            if r.get("mode") == "soft":
+                lines.append(f"  OK {r['path']} → moved to {r.get('trashed_to')}")
+            else:
+                lines.append(f"  OK {r['path']} (permanently deleted)")
+        for r in failed:
+            lines.append(f"  FAIL {r['path']}: {r['error']}")
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def get_projects() -> str:
     """Get all project folders from the 20_Projects directory, with their vault path.
 

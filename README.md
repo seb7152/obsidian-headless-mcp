@@ -238,6 +238,9 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/folders` | Create one or more folders (batch), including missing parent folders |
+| `DELETE` | `/api/folders` | Delete one or more folders (batch), recursively |
+
+**Create**
 
 Body: `{ "paths": ["20_Projects/Alpha", "20_Projects/Alpha/Docs"] }` — up to 100 entries.
 Useful for scaffolding a directory structure in one call. Creating a folder that
@@ -249,6 +252,21 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   -d '{"paths":["20_Projects/Alpha","20_Projects/Alpha/Docs","20_Projects/Alpha/Assets"]}' \
   https://obsidian-api.yourdomain.com/api/folders
 # → {"results":[{"path":"20_Projects/Alpha","success":true,"already_existed":false},...],"count":3,"failed_count":0}
+```
+
+**Delete**
+
+Body: `{ "paths": ["20_Projects/Alpha", "20_Projects/Beta"] }` — up to 100 entries.
+Soft-deletes by default (each folder tree is moved into `.trash/`, recoverable);
+pass `?hard=true` (or `{ "hard": true }` in the body) to remove permanently. The
+vault root cannot be deleted this way.
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["20_Projects/Alpha"]}' \
+  https://obsidian-api.yourdomain.com/api/folders
+# → {"results":[{"path":"20_Projects/Alpha","success":true,"mode":"soft","trashed_to":".trash/20_Projects/Alpha"}],"count":1,"failed_count":0}
 ```
 
 ### Directory
@@ -528,6 +546,7 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 | Tool | Description |
 |------|-------------|
 | `create_folders(folder_paths)` | Create one or more folders (up to 100), including missing parent folders — scaffolds a directory structure in one call |
+| `delete_folders(folder_paths, hard=False)` | Delete one or more folders (up to 100), recursively — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
 | `list_directory(dir_path)` | List files and subdirectories; leave `dir_path` empty for vault root |
 | `search_vault(query, fuzzy, since, before)` | Search vault — keyword (default) or fuzzy with date filters |
 | `get_projects()` | List project folders under `20_Projects/` |
