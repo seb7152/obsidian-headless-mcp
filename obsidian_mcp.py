@@ -304,6 +304,44 @@ def delete_folders(folder_paths: list, hard: bool = False) -> str:
 
 
 @mcp.tool()
+def move_folders(moves: list) -> str:
+    """Move or rename one or more folders within the vault.
+
+    Each entry renames/relocates one folder to its own destination — use this
+    to restructure a vault (rename a project folder, regroup subfolders under
+    a new parent, etc.). Any missing parent folders in the destination are
+    created automatically. Processes up to 100 moves per call.
+
+    Args:
+        moves: List of {"from": ..., "to": ...} dicts, both paths relative to
+               vault root (e.g., [{"from": "20_Projects/Alpha", "to": "20_Projects/AlphaRenamed"}])
+    """
+    try:
+        response = api_client.post(
+            f"{OBSIDIAN_API_URL}/folders/move",
+            json={"moves": moves}
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        total = data.get("count", 0)
+
+        ok = [r for r in results if r.get("success")]
+        failed = [r for r in results if r.get("error")]
+
+        lines = [f"Folder move: {len(ok)}/{total} succeeded"]
+        for r in ok:
+            lines.append(f"  OK {r['from']} → {r['to']}")
+        for r in failed:
+            lines.append(f"  FAIL {r.get('from')} → {r.get('to')}: {r['error']}")
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def get_projects() -> str:
     """Get all project folders from the 20_Projects directory, with their vault path.
 

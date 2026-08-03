@@ -786,6 +786,54 @@ app.delete('/api/folders', (req, res) => {
   res.json({ results, count: results.length, failed_count: failed.length });
 });
 
+// Move/rename one or more folders (batch). Each entry is an independent {from, to}
+// pair — unlike POST /api/files/move (relocate several files into one shared
+// destination_folder), a folder move needs its own destination per entry. Any
+// missing parent folders in the destination are created automatically.
+// Body: { "moves": [{"from": "20_Projects/Alpha", "to": "20_Projects/AlphaRenamed"}] }
+app.post('/api/folders/move', (req, res) => {
+  const { moves } = req.body || {};
+
+  if (!Array.isArray(moves) || moves.length === 0) {
+    return res.status(400).json({ error: '"moves" must be a non-empty array' });
+  }
+  if (moves.length > 100) {
+    return res.status(400).json({ error: '"moves" must contain at most 100 entries' });
+  }
+
+  const results = moves.map(entry => {
+    const { from, to } = entry || {};
+    if (!from || !to) {
+      return { from, to, error: '"from" and "to" are both required' };
+    }
+
+    try {
+      const srcPath = path.join(VAULT_PATH, from);
+      const destPath = path.join(VAULT_PATH, to);
+
+      if (!srcPath.startsWith(VAULT_PREFIX)) return { from, to, error: 'Access denied: from' };
+      if (!destPath.startsWith(VAULT_PREFIX)) return { from, to, error: 'Access denied: to' };
+      if (srcPath === VAULT_PATH) return { from, to, error: 'Cannot move the vault root' };
+      if (!fs.existsSync(srcPath)) return { from, to, error: 'Folder not found' };
+      if (!fs.statSync(srcPath).isDirectory()) return { from, to, error: 'Not a folder' };
+      if (srcPath === destPath) return { from, to, error: '"from" and "to" are the same path' };
+      if (fs.existsSync(destPath)) return { from, to, error: 'Destination already exists' };
+      if ((destPath + path.sep).startsWith(srcPath + path.sep)) {
+        return { from, to, error: 'Cannot move a folder into itself' };
+      }
+
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      fs.renameSync(srcPath, destPath);
+      return { from, to, success: true };
+    } catch (err) {
+      return { from, to, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
 // List directory contents
 app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
   try {

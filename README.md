@@ -239,6 +239,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 |--------|------|-------------|
 | `POST` | `/api/folders` | Create one or more folders (batch), including missing parent folders |
 | `DELETE` | `/api/folders` | Delete one or more folders (batch), recursively |
+| `POST` | `/api/folders/move` | Move or rename one or more folders (batch), each to its own destination |
 
 **Create**
 
@@ -267,6 +268,21 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   -d '{"paths":["20_Projects/Alpha"]}' \
   https://obsidian-api.yourdomain.com/api/folders
 # → {"results":[{"path":"20_Projects/Alpha","success":true,"mode":"soft","trashed_to":".trash/20_Projects/Alpha"}],"count":1,"failed_count":0}
+```
+
+**Move / rename**
+
+Body: `{ "moves": [{"from": "20_Projects/Alpha", "to": "20_Projects/AlphaRenamed"}] }` — up
+to 100 entries. Each entry is an independent `{from, to}` pair (unlike bulk file
+move, which relocates several files into one shared destination folder). Missing
+parent folders in the destination are created automatically.
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"moves":[{"from":"20_Projects/Alpha","to":"20_Projects/AlphaRenamed"}]}' \
+  https://obsidian-api.yourdomain.com/api/folders/move
+# → {"results":[{"from":"20_Projects/Alpha","to":"20_Projects/AlphaRenamed","success":true}],"count":1,"failed_count":0}
 ```
 
 ### Directory
@@ -547,6 +563,7 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 |------|-------------|
 | `create_folders(folder_paths)` | Create one or more folders (up to 100), including missing parent folders — scaffolds a directory structure in one call |
 | `delete_folders(folder_paths, hard=False)` | Delete one or more folders (up to 100), recursively — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
+| `move_folders(moves)` | Move or rename one or more folders (up to 100); each entry is its own `{"from": ..., "to": ...}` dict — missing destination parent folders are created automatically |
 | `list_directory(dir_path)` | List files and subdirectories; leave `dir_path` empty for vault root |
 | `search_vault(query, fuzzy, since, before)` | Search vault — keyword (default) or fuzzy with date filters |
 | `get_projects()` | List project folders under `20_Projects/` |
