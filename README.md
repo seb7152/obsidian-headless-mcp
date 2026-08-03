@@ -233,6 +233,24 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   https://obsidian-api.yourdomain.com/api/files/move
 ```
 
+### Folders
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/api/folders` | Create one or more folders (batch), including missing parent folders |
+
+Body: `{ "paths": ["20_Projects/Alpha", "20_Projects/Alpha/Docs"] }` — up to 100 entries.
+Useful for scaffolding a directory structure in one call. Creating a folder that
+already exists is not an error.
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"paths":["20_Projects/Alpha","20_Projects/Alpha/Docs","20_Projects/Alpha/Assets"]}' \
+  https://obsidian-api.yourdomain.com/api/folders
+# → {"results":[{"path":"20_Projects/Alpha","success":true,"already_existed":false},...],"count":3,"failed_count":0}
+```
+
 ### Directory
 
 | Method | Path | Description |
@@ -509,6 +527,7 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 
 | Tool | Description |
 |------|-------------|
+| `create_folders(folder_paths)` | Create one or more folders (up to 100), including missing parent folders — scaffolds a directory structure in one call |
 | `list_directory(dir_path)` | List files and subdirectories; leave `dir_path` empty for vault root |
 | `search_vault(query, fuzzy, since, before)` | Search vault — keyword (default) or fuzzy with date filters |
 | `get_projects()` | List project folders under `20_Projects/` |

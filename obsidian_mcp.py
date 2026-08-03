@@ -222,6 +222,44 @@ def list_directory(dir_path: str = "") -> str:
 
 
 @mcp.tool()
+def create_folders(folder_paths: list) -> str:
+    """Create one or more folders in the vault, including any missing parent folders.
+
+    Useful for scaffolding a directory structure in one call — e.g. a project
+    skeleton made of several subfolders. Creating a folder that already exists
+    is not an error. Processes up to 100 folders per call.
+
+    Args:
+        folder_paths: List of folder paths relative to vault root
+                       (e.g., ["20_Projects/Alpha", "20_Projects/Alpha/Docs"])
+    """
+    try:
+        response = api_client.post(
+            f"{OBSIDIAN_API_URL}/folders",
+            json={"paths": folder_paths}
+        )
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        total = data.get("count", 0)
+
+        ok = [r for r in results if r.get("success")]
+        failed = [r for r in results if r.get("error")]
+
+        lines = [f"Folder creation: {len(ok)}/{total} succeeded"]
+        for r in ok:
+            note = " (already existed)" if r.get("already_existed") else ""
+            lines.append(f"  OK {r['path']}{note}")
+        for r in failed:
+            lines.append(f"  FAIL {r['path']}: {r['error']}")
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def get_projects() -> str:
     """Get all project folders from the 20_Projects directory, with their vault path.
 

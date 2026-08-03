@@ -692,6 +692,42 @@ app.patch('/api/files/batch', (req, res) => {
   res.json({ results, count: results.length, failed_count: failed.length });
 });
 
+// Create one or more folders (and any missing parent folders) in a single call —
+// used to scaffold a directory structure (e.g. a project skeleton with subfolders).
+// Body: { "paths": ["20_Projects/Alpha", "20_Projects/Alpha/Docs"] }
+app.post('/api/folders', (req, res) => {
+  const { paths } = req.body || {};
+
+  if (!Array.isArray(paths) || paths.length === 0) {
+    return res.status(400).json({ error: '"paths" must be a non-empty array' });
+  }
+  if (paths.length > 100) {
+    return res.status(400).json({ error: '"paths" must contain at most 100 entries' });
+  }
+
+  const results = paths.map(relativePath => {
+    try {
+      const dirPath = path.join(VAULT_PATH, relativePath);
+      if (!dirPath.startsWith(VAULT_PREFIX)) {
+        return { path: relativePath, error: 'Access denied' };
+      }
+
+      const alreadyExisted = fs.existsSync(dirPath);
+      if (alreadyExisted && !fs.statSync(dirPath).isDirectory()) {
+        return { path: relativePath, error: 'A file already exists at this path' };
+      }
+
+      fs.mkdirSync(dirPath, { recursive: true });
+      return { path: relativePath, success: true, already_existed: alreadyExisted };
+    } catch (err) {
+      return { path: relativePath, error: err.message };
+    }
+  });
+
+  const failed = results.filter(r => r.error);
+  res.json({ results, count: results.length, failed_count: failed.length });
+});
+
 // List directory contents
 app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
   try {
