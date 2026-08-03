@@ -740,12 +740,47 @@ def sync_vault() -> str:
 
 @mcp.tool()
 def get_sync_status() -> str:
-    """Get current sync status of the vault"""
+    """Get the current sync status of the vault, plus the health of the SQLite
+    index and its file watcher.
+
+    The watcher has occasionally stopped picking up file changes silently
+    (e.g. inotify not propagating across Docker bind mounts), leaving the
+    index — and therefore search_vault/query_vault — stale without any
+    visible error. This surfaces whether the watcher is still alive, when it
+    last processed a file, its last error (if any), and whether the indexed
+    file count matches the vault's actual file count.
+    """
     try:
         response = api_client.get(f"{OBSIDIAN_API_URL}/sync/status")
         response.raise_for_status()
         data = response.json()
-        return str(data.get("status", "Unknown status"))
+
+        lines = [f"Obsidian Sync: {data.get('status', 'Unknown status')}"]
+        if data.get("error"):
+            lines.append(f"  Sync error: {data['error']}")
+
+        indexer = data.get("indexer") or {}
+        if indexer.get("error"):
+            lines.append(f"Index status: error — {indexer['error']}")
+            return "\n".join(lines)
+
+        lines.append("")
+        lines.append(f"Index watcher: {'ready' if indexer.get('watcher_ready') else 'not ready'}"
+                      f"{' (closed!)' if indexer.get('watcher_closed') else ''}")
+        lines.append(f"Indexed files: {indexer.get('db_file_count')} / vault files: {indexer.get('vault_file_count')}"
+                      f" ({'in sync' if indexer.get('in_sync') else 'MISMATCH — index may be stale'})")
+
+        last_event = indexer.get("last_event")
+        if last_event:
+            lines.append(f"Last index event: {last_event.get('type')} {last_event.get('path') or ''} at {last_event.get('at')}")
+        else:
+            lines.append("Last index event: none recorded")
+
+        last_error = indexer.get("last_error")
+        if last_error:
+            lines.append(f"Last index error: {last_error.get('message')} at {last_error.get('at')}")
+
+        return "\n".join(lines)
     except Exception as e:
         return f"Error getting sync status: {e}"
 

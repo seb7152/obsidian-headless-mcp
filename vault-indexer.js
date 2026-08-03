@@ -33,6 +33,41 @@ db.exec(`
   );
 `);
 
+// -- Health tracking --
+// Exposed via getIndexerStatus() for the /api/sync/status endpoint. Watcher
+// events sometimes silently stop firing (e.g. inotify not propagating across
+// Docker bind mounts), which would otherwise go unnoticed until a search or
+// query returns stale results.
+let watcherReady = false;
+let watcherClosed = false;
+let lastEvent = null; // { type: 'add'|'change'|'unlink'|'full_reindex', path, at }
+let lastError = null; // { message, at }
+
+function recordEvent(type, relPath) {
+  lastEvent = { type, path: relPath, at: new Date().toISOString() };
+}
+
+function recordError(message) {
+  lastError = { message, at: new Date().toISOString() };
+  console.error(`[indexer] ${message}`);
+}
+
+function getIndexerStatus() {
+  let dbFileCount = null;
+  try {
+    dbFileCount = db.prepare('SELECT COUNT(*) as c FROM files').get().c;
+  } catch (err) {
+    recordError(`Status query failed: ${err.message}`);
+  }
+  return {
+    watcher_ready: watcherReady,
+    watcher_closed: watcherClosed,
+    db_file_count: dbFileCount,
+    last_event: lastEvent,
+    last_error: lastError
+  };
+}
+
 // -- Helpers --
 
 function parseFrontmatter(content) {
@@ -131,7 +166,7 @@ function indexFile(filePath) {
     );
     return { rel, frontmatter: fm, body };
   } catch (err) {
-    console.error(`[indexer] Failed to index ${filePath}: ${err.message}`);
+    recordError(`Failed to index ${filePath}: ${err.message}`);
     return null;
   }
 }
@@ -157,6 +192,7 @@ function fullReindex() {
   const files = walkMd(VAULT_PATH);
   db.transaction(() => files.forEach(indexFile))();
   console.log(`[indexer] Indexed ${files.length} files`);
+  recordEvent('full_reindex', null);
 }
 
 function startWatcher() {
@@ -182,21 +218,33 @@ function startWatcher() {
   // entirely in chokidar v4. Filter to .md in the handlers instead.
   chokidar
     .watch(VAULT_PATH, watchOptions)
+    .on('ready', () => { watcherReady = true; })
+    .on('error', (err) => {
+      recordError(`Watcher error: ${err.message}`);
+      watcherClosed = true;
+    })
     .on('add', (fp) => {
       if (!isMarkdown(fp)) return;
       const r = indexFile(fp);
-      if (r) webhooks.dispatch('add', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
+      if (r) {
+        recordEvent('add', r.rel);
+        webhooks.dispatch('add', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
+      }
     })
     .on('change', (fp) => {
       if (!isMarkdown(fp)) return;
       const r = indexFile(fp);
-      if (r) webhooks.dispatch('change', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
+      if (r) {
+        recordEvent('change', r.rel);
+        webhooks.dispatch('change', { relPath: r.rel, frontmatter: r.frontmatter, body: r.body });
+      }
     })
     .on('unlink', (fp) => {
       if (!isMarkdown(fp)) return;
       const rel = path.relative(VAULT_PATH, fp);
       const frontmatter = lastKnownFrontmatter(rel); // read before deleting from index
       removeFile(fp);
+      recordEvent('unlink', rel);
       webhooks.dispatch('unlink', { relPath: rel, frontmatter });
     });
   console.log(`[indexer] Watching for changes… (polling: ${watchOptions.usePolling ? 'on' : 'off'})`);
@@ -208,4 +256,4 @@ if (db.prepare('SELECT COUNT(*) as c FROM files').get().c === 0) {
 }
 startWatcher();
 
-module.exports = { db, indexFile, removeFile };
+module.exports = { db, indexFile, removeFile, getIndexerStatus };

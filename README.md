@@ -400,7 +400,33 @@ Returns the contents of `agent.md`, which can hold instructions or context for A
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/api/sync` | Trigger a vault sync with Obsidian Sync |
-| `GET` | `/api/sync/status` | Get current sync status |
+| `GET` | `/api/sync/status` | Get current sync status, plus SQLite index / file watcher health |
+
+`/api/sync/status` also reports on the SQLite index and its file watcher —
+useful because the watcher has occasionally stopped picking up changes
+silently (e.g. inotify not propagating across Docker bind mounts), leaving
+the index (and therefore `/api/search`, `/api/query`) stale without any
+visible error.
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/sync/status
+# → {
+#     "status": "...",
+#     "indexer": {
+#       "watcher_ready": true,
+#       "watcher_closed": false,
+#       "db_file_count": 842,
+#       "vault_file_count": 842,
+#       "in_sync": true,
+#       "last_event": {"type": "change", "path": "notes/a.md", "at": "2026-08-03T21:10:00.000Z"},
+#       "last_error": null
+#     }
+#   }
+```
+
+- `watcher_closed: true` or a persistently old `last_event.at` while files keep changing on disk is a strong signal the watcher died and needs a restart.
+- `in_sync: false` means the indexed file count doesn't match the vault's actual `.md` file count — a full reindex (restart the service) will resync it.
 
 ### Webhooks
 
@@ -581,7 +607,7 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 | Tool | Description |
 |------|-------------|
 | `sync_vault()` | Trigger vault sync with Obsidian Sync |
-| `get_sync_status()` | Get current sync status |
+| `get_sync_status()` | Get current sync status, plus SQLite index / file watcher health (watcher liveness, last event, last error, indexed vs actual file count) |
 
 #### Webhooks (read-only)
 
