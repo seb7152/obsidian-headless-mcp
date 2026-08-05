@@ -2,6 +2,7 @@
 
 import httpx
 import os
+import re
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -21,6 +22,57 @@ api_client = httpx.Client(headers={"Authorization": f"Bearer {API_TOKEN}"})
 # Create MCP server — DNS rebinding protection disabled because token auth is handled
 # by AuthMiddleware (legacy static token or Zitadel bearer token validated on every request)
 mcp = FastMCP("Obsidian", transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+
+# Document Comment plugin markers, shared by extract_comments and extract_comments_bulk:
+# an anchor span `<!--c:ID-->text<!--/c:ID-->` wrapping the commented passage, and a
+# thread block `<!--co:ID by:author at:timestamp status:status quote:"..."` followed by
+# one reply line per participant (`Author (timestamp): text`), closed by `-->`.
+_COMMENT_ANCHOR_RE = re.compile(r'<!--c:([\w-]+)-->(.*?)<!--/c:\1-->', re.DOTALL)
+_COMMENT_THREAD_RE = re.compile(
+    r'<!--co:([\w-]+)\s+by:(\S+)\s+at:(\S+)\s+status:(\S+)\s+quote:"((?:[^"\\]|\\.)*)"\s*\n(.*?)-->',
+    re.DOTALL
+)
+_COMMENT_REPLY_RE = re.compile(r'^(.+?) \(([^)]+)\):\s?(.*)$')
+
+
+def _parse_comment_threads(content: str) -> list[dict]:
+    """Parse Document Comment plugin threads out of raw markdown content.
+
+    Returns a list of `{"id", "status", "quote", "created_by", "created_at",
+    "anchored_text", "replies"}` dicts — see extract_comments' docstring for
+    the field semantics.
+    """
+    anchors = {m.group(1): m.group(2).strip() for m in _COMMENT_ANCHOR_RE.finditer(content)}
+
+    comments = []
+    for match in _COMMENT_THREAD_RE.finditer(content):
+        comment_id, author, at, status, quote, body = match.groups()
+
+        replies = []
+        for line in body.strip("\n").split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            reply_match = _COMMENT_REPLY_RE.match(line)
+            if reply_match:
+                replies.append({
+                    "author": reply_match.group(1),
+                    "at": reply_match.group(2),
+                    "text": reply_match.group(3),
+                })
+
+        comments.append({
+            "id": comment_id,
+            "status": status,
+            "quote": quote,
+            "created_by": author,
+            "created_at": at,
+            "anchored_text": anchors.get(comment_id),
+            "replies": replies,
+        })
+
+    return comments
+
 
 # ==================== RESOURCES ====================
 
@@ -773,54 +825,86 @@ def extract_comments(file_path: str) -> str:
         file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
     """
     import json
-    import re
-
-    anchor_re = re.compile(r'<!--c:([\w-]+)-->(.*?)<!--/c:\1-->', re.DOTALL)
-    thread_re = re.compile(
-        r'<!--co:([\w-]+)\s+by:(\S+)\s+at:(\S+)\s+status:(\S+)\s+quote:"((?:[^"\\]|\\.)*)"\s*\n(.*?)-->',
-        re.DOTALL
-    )
-    reply_re = re.compile(r'^(.+?) \(([^)]+)\):\s?(.*)$')
 
     try:
         response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
         response.raise_for_status()
         content = response.json().get("content", "")
 
-        anchors = {m.group(1): m.group(2).strip() for m in anchor_re.finditer(content)}
-
-        comments = []
-        for match in thread_re.finditer(content):
-            comment_id, author, at, status, quote, body = match.groups()
-
-            replies = []
-            for line in body.strip("\n").split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                reply_match = reply_re.match(line)
-                if reply_match:
-                    replies.append({
-                        "author": reply_match.group(1),
-                        "at": reply_match.group(2),
-                        "text": reply_match.group(3),
-                    })
-
-            comments.append({
-                "id": comment_id,
-                "status": status,
-                "quote": quote,
-                "created_by": author,
-                "created_at": at,
-                "anchored_text": anchors.get(comment_id),
-                "replies": replies,
-            })
+        comments = _parse_comment_threads(content)
 
         return json.dumps({"comments": comments}, ensure_ascii=False, indent=2)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return json.dumps({"error": f"File not found: {file_path}"})
         return json.dumps({"error": f"Error reading file: {e}"})
+    except Exception as e:
+        return json.dumps({"error": f"Error: {e}"})
+
+
+@mcp.tool()
+def extract_comments_bulk(file_paths: list = None, folder: str = "") -> str:
+    """Extract Document Comment plugin threads from many files at once, as JSON.
+
+    Same extraction logic as extract_comments (see its docstring for the marker
+    syntax and field semantics), applied across a set of files instead of one —
+    so an agent can spot every open comment thread in a project without reading
+    each note in full. Provide exactly one of `file_paths` or `folder`.
+
+    Files with zero comment threads are omitted from `files` to keep the
+    response focused; `scanned_count` still reflects every file looked at.
+
+    Args:
+        file_paths: Explicit list of file paths relative to vault root
+                    (e.g., ["notes/a.md", "notes/b.md"]). Mutually exclusive with `folder`.
+        folder: Folder path relative to vault root, scanned recursively for every
+                .md file in it (e.g. '20_Projects/MyProject'). Mutually exclusive
+                with `file_paths`.
+    """
+    import json
+
+    if bool(file_paths) == bool(folder):
+        return json.dumps({"error": "Provide exactly one of file_paths or folder"})
+
+    try:
+        if folder:
+            response = api_client.get(f"{OBSIDIAN_API_URL}/files", params={"path": folder})
+            response.raise_for_status()
+            file_paths = [f["path"] for f in response.json().get("files", [])]
+
+        if not file_paths:
+            return json.dumps({"files": [], "scanned_count": 0})
+
+        results = []
+        errors = []
+        BATCH_SIZE = 100
+        for i in range(0, len(file_paths), BATCH_SIZE):
+            batch = file_paths[i:i + BATCH_SIZE]
+            response = api_client.post(f"{OBSIDIAN_API_URL}/files/batch", json={"paths": batch})
+            response.raise_for_status()
+            results.extend(response.json().get("files", []))
+
+        files_with_comments = []
+        for entry in results:
+            if entry.get("error"):
+                errors.append({"path": entry["path"], "error": entry["error"]})
+                continue
+
+            comments = _parse_comment_threads(entry.get("content", ""))
+            if comments:
+                files_with_comments.append({"path": entry["path"], "comments": comments})
+
+        output = {
+            "files": files_with_comments,
+            "scanned_count": len(results),
+            "files_with_comments_count": len(files_with_comments),
+        }
+        if errors:
+            output["errors"] = errors
+
+        return json.dumps(output, ensure_ascii=False, indent=2)
+    except httpx.HTTPStatusError as e:
+        return json.dumps({"error": f"Error: {e}"})
     except Exception as e:
         return json.dumps({"error": f"Error: {e}"})
 
