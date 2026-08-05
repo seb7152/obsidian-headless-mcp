@@ -49,17 +49,41 @@ def vault_status() -> str:
 # ==================== TOOLS ====================
 
 @mcp.tool()
-def read_file(file_path: str) -> str:
+def read_file(file_path: str, resolve_links: bool = True) -> str:
     """Read a markdown file from the vault
+
+    By default, [[wikilinks]] in the file are also resolved server-side and
+    returned as JSON: `{"content": str, "wikilinks": [{"raw", "target",
+    "exists", "resolved", "ambiguous"?}]}`. `raw` is the link as written
+    (e.g. `Note|Alias` or `folder/Note#Section`), `target` is it with the
+    alias/heading anchor stripped, `resolved` is the actual note path if
+    `exists` is True (Obsidian's shortest-path resolution can point `target`
+    to a different folder than expected), and `ambiguous` — only present when
+    relevant — lists every candidate path when multiple notes share a
+    basename. `resolved` is None for broken links.
+
+    Set resolve_links=False to skip this and get the raw markdown content
+    only (no JSON envelope) — cheaper when you just need the text.
 
     Args:
         file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        resolve_links: Resolve [[wikilinks]] server-side and return as JSON (default: True)
     """
+    import json
+
     try:
-        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        params = {"resolve_links": "true"} if resolve_links else {}
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}", params=params)
         response.raise_for_status()
         data = response.json()
-        return data.get("content", "")
+
+        if not resolve_links:
+            return data.get("content", "")
+
+        return json.dumps({
+            "content": data.get("content", ""),
+            "wikilinks": data.get("wikilinks", []),
+        }, ensure_ascii=False, indent=2)
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"File not found: {file_path}"

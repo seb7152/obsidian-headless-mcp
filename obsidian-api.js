@@ -179,6 +179,19 @@ function fuzzySuggest(target, { byName }, maxResults = 3) {
     .map(({ paths }) => paths[0]);
 }
 
+// Helper: resolve every [[wikilink]] in body against the vault index
+// Optional suggest: attach up to 3 fuzzy suggestions to unresolved links
+function resolveAllWikilinks(body, { suggest = false } = {}) {
+  const index = buildNoteIndex();
+  return parseWikilinks(body).map(({ raw, target }) => {
+    const { exists, resolved, ambiguous } = resolveWikilink(target, index);
+    const entry = { raw, target, exists, resolved };
+    if (ambiguous) entry.ambiguous = ambiguous;
+    if (!exists && suggest) entry.suggestions = fuzzySuggest(target, index);
+    return entry;
+  });
+}
+
 // Helper: count non-overlapping occurrences of a literal substring
 function countOccurrences(haystack, needle) {
   if (needle === '') return 0;
@@ -277,18 +290,11 @@ app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
     const suggest = req.query.suggest === 'true';
     const content = fs.readFileSync(filePath, 'utf-8');
     const { body } = parseFrontmatter(content);
-    const index = buildNoteIndex();
 
-    const allLinks = parseWikilinks(body);
-    const brokenLinks = allLinks.reduce((acc, { raw, target }) => {
-      const { exists } = resolveWikilink(target, index);
-      if (!exists) {
-        const entry = { raw, target };
-        if (suggest) entry.suggestions = fuzzySuggest(target, index);
-        acc.push(entry);
-      }
-      return acc;
-    }, []);
+    const allLinks = resolveAllWikilinks(body, { suggest });
+    const brokenLinks = allLinks
+      .filter(({ exists }) => !exists)
+      .map(({ raw, target, suggestions }) => suggestions ? { raw, target, suggestions } : { raw, target });
 
     const response = {
       path: req.params[0],
@@ -320,12 +326,17 @@ app.get(/^\/api\/file\/(.+)$/, (req, res) => {
     const content = fs.readFileSync(filePath, 'utf-8');
     const { frontmatter, body } = parseFrontmatter(content);
 
-    res.json({
+    const response = {
       path: req.params[0],
       frontmatter,
       body,
       content
-    });
+    };
+    if (req.query.resolve_links === 'true') {
+      response.wikilinks = resolveAllWikilinks(body);
+    }
+
+    res.json(response);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
