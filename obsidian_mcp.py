@@ -729,6 +729,79 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
 
 
 @mcp.tool()
+def extract_comments(file_path: str) -> str:
+    """Extract Document Comment plugin comment threads from a file, as JSON.
+
+    Recognizes the plugin's two markers: an anchor span
+    `<!--c:ID-->text<!--/c:ID-->` wrapping the commented passage, and a thread
+    block `<!--co:ID by:author at:timestamp status:status quote:"..."` followed
+    by one reply line per participant (`Author (timestamp): text`), closed by
+    `-->`.
+
+    Each comment is `{"id", "status", "quote", "created_by", "created_at",
+    "anchored_text", "replies": [{"author", "at", "text"}]}`. `quote` is the
+    snapshot of the anchored text taken when the thread was created;
+    `anchored_text` is what the `c:ID` span currently wraps in the body — the
+    two can diverge if the passage was edited afterward. `anchored_text` is
+    `null` if no matching span is found (e.g. the anchor was removed).
+
+    Args:
+        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+    """
+    import json
+    import re
+
+    anchor_re = re.compile(r'<!--c:([\w-]+)-->(.*?)<!--/c:\1-->', re.DOTALL)
+    thread_re = re.compile(
+        r'<!--co:([\w-]+)\s+by:(\S+)\s+at:(\S+)\s+status:(\S+)\s+quote:"((?:[^"\\]|\\.)*)"\s*\n(.*?)-->',
+        re.DOTALL
+    )
+    reply_re = re.compile(r'^(.+?) \(([^)]+)\):\s?(.*)$')
+
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response.raise_for_status()
+        content = response.json().get("content", "")
+
+        anchors = {m.group(1): m.group(2).strip() for m in anchor_re.finditer(content)}
+
+        comments = []
+        for match in thread_re.finditer(content):
+            comment_id, author, at, status, quote, body = match.groups()
+
+            replies = []
+            for line in body.strip("\n").split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                reply_match = reply_re.match(line)
+                if reply_match:
+                    replies.append({
+                        "author": reply_match.group(1),
+                        "at": reply_match.group(2),
+                        "text": reply_match.group(3),
+                    })
+
+            comments.append({
+                "id": comment_id,
+                "status": status,
+                "quote": quote,
+                "created_by": author,
+                "created_at": at,
+                "anchored_text": anchors.get(comment_id),
+                "replies": replies,
+            })
+
+        return json.dumps({"comments": comments}, ensure_ascii=False, indent=2)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return json.dumps({"error": f"File not found: {file_path}"})
+        return json.dumps({"error": f"Error reading file: {e}"})
+    except Exception as e:
+        return json.dumps({"error": f"Error: {e}"})
+
+
+@mcp.tool()
 def sync_vault() -> str:
     """Manually trigger a vault sync with Obsidian Sync service"""
     try:
