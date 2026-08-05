@@ -805,14 +805,26 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
 
 
 @mcp.tool()
-def extract_comments(file_path: str) -> str:
-    """Extract Document Comment plugin comment threads from a file, as JSON.
+def extract_comments(file_path: str = None, file_paths: list = None, folder: str = None) -> str:
+    """Extract Document Comment plugin comment threads from one or more files, as JSON.
+
+    Provide exactly one of:
+    - file_path: a single file to inspect
+    - file_paths: an explicit list of files (e.g., ["notes/a.md", "notes/b.md"])
+    - folder: a folder path, scanned recursively for every .md file in it
+              (e.g. '20_Projects/MyProject')
 
     Recognizes the plugin's two markers: an anchor span
     `<!--c:ID-->text<!--/c:ID-->` wrapping the commented passage, and a thread
     block `<!--co:ID by:author at:timestamp status:status quote:"..."` followed
     by one reply line per participant (`Author (timestamp): text`), closed by
     `-->`.
+
+    Returns `{"files": [{"path", "comments": [...]}], "scanned_count",
+    "files_with_comments_count"}`. Files with zero comment threads are omitted
+    from `files` to keep the response focused — a single-file call with no
+    comments returns an empty `files` list, not an error; `scanned_count`
+    still reflects every file looked at.
 
     Each comment is `{"id", "status", "quote", "created_by", "created_at",
     "anchored_text", "replies": [{"author", "at", "text"}]}`. `quote` is the
@@ -822,69 +834,41 @@ def extract_comments(file_path: str) -> str:
     `null` if no matching span is found (e.g. the anchor was removed).
 
     Args:
-        file_path: Path to the file relative to vault root (e.g., 'notes/my-note.md')
+        file_path: Single file path relative to vault root. Mutually exclusive
+                   with file_paths/folder.
+        file_paths: List of file paths relative to vault root. Mutually
+                    exclusive with file_path/folder.
+        folder: Folder path relative to vault root, scanned recursively.
+                Mutually exclusive with file_path/file_paths.
     """
     import json
 
-    try:
-        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
-        response.raise_for_status()
-        content = response.json().get("content", "")
-
-        comments = _parse_comment_threads(content)
-
-        return json.dumps({"comments": comments}, ensure_ascii=False, indent=2)
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 404:
-            return json.dumps({"error": f"File not found: {file_path}"})
-        return json.dumps({"error": f"Error reading file: {e}"})
-    except Exception as e:
-        return json.dumps({"error": f"Error: {e}"})
-
-
-@mcp.tool()
-def extract_comments_bulk(file_paths: list = None, folder: str = "") -> str:
-    """Extract Document Comment plugin threads from many files at once, as JSON.
-
-    Same extraction logic as extract_comments (see its docstring for the marker
-    syntax and field semantics), applied across a set of files instead of one —
-    so an agent can spot every open comment thread in a project without reading
-    each note in full. Provide exactly one of `file_paths` or `folder`.
-
-    Files with zero comment threads are omitted from `files` to keep the
-    response focused; `scanned_count` still reflects every file looked at.
-
-    Args:
-        file_paths: Explicit list of file paths relative to vault root
-                    (e.g., ["notes/a.md", "notes/b.md"]). Mutually exclusive with `folder`.
-        folder: Folder path relative to vault root, scanned recursively for every
-                .md file in it (e.g. '20_Projects/MyProject'). Mutually exclusive
-                with `file_paths`.
-    """
-    import json
-
-    if bool(file_paths) == bool(folder):
-        return json.dumps({"error": "Provide exactly one of file_paths or folder"})
+    if len([p for p in (file_path, file_paths, folder) if p]) != 1:
+        return json.dumps({"error": "Provide exactly one of file_path, file_paths, or folder"})
 
     try:
-        if folder:
+        if file_path:
+            paths = [file_path]
+        elif folder:
             response = api_client.get(f"{OBSIDIAN_API_URL}/files", params={"path": folder})
             response.raise_for_status()
-            file_paths = [f["path"] for f in response.json().get("files", [])]
+            paths = [f["path"] for f in response.json().get("files", [])]
+        else:
+            paths = file_paths
 
-        if not file_paths:
-            return json.dumps({"files": [], "scanned_count": 0})
+        if not paths:
+            return json.dumps({"files": [], "scanned_count": 0, "files_with_comments_count": 0})
 
         results = []
-        errors = []
         BATCH_SIZE = 100
-        for i in range(0, len(file_paths), BATCH_SIZE):
-            batch = file_paths[i:i + BATCH_SIZE]
+        for i in range(0, len(paths), BATCH_SIZE):
+            batch = paths[i:i + BATCH_SIZE]
             response = api_client.post(f"{OBSIDIAN_API_URL}/files/batch", json={"paths": batch})
             response.raise_for_status()
             results.extend(response.json().get("files", []))
 
         files_with_comments = []
+        errors = []
         for entry in results:
             if entry.get("error"):
                 errors.append({"path": entry["path"], "error": entry["error"]})
