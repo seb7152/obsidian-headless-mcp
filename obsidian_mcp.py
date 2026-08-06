@@ -200,7 +200,11 @@ def append_to_file(file_path: str, content: str) -> str:
             json={"content": new_content}
         )
         write_response.raise_for_status()
-        return f"Content appended to {file_path}"
+        message = f"Content appended to {file_path}"
+        uri = _obsidian_uri(file_path)
+        if uri:
+            message += f"\nURL: {uri}"
+        return message
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             # File doesn't exist, create it
@@ -209,7 +213,11 @@ def append_to_file(file_path: str, content: str) -> str:
                 json={"content": content}
             )
             write_response.raise_for_status()
-            return f"File created: {file_path}"
+            message = f"File created: {file_path}"
+            uri = _obsidian_uri(file_path)
+            if uri:
+                message += f"\nURL: {uri}"
+            return message
         return f"Error appending: {e}"
     except Exception as e:
         return f"Error: {e}"
@@ -477,7 +485,11 @@ def update_frontmatter(file_path: str, updates: dict) -> str:
         data = response.json()
         fm = data.get("frontmatter", {})
         fields = ", ".join(f"{k}={v!r}" for k, v in fm.items())
-        return f"Frontmatter updated for {file_path}: {fields}"
+        message = f"Frontmatter updated for {file_path}: {fields}"
+        uri = _obsidian_uri(file_path)
+        if uri:
+            message += f"\nURL: {uri}"
+        return message
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
             return f"File not found: {file_path}"
@@ -513,6 +525,12 @@ def bulk_update_frontmatter(file_paths: list, updates: dict) -> str:
         failed = [r for r in results if r.get("error")]
 
         lines = [f"Bulk frontmatter update: {len(ok)}/{total} succeeded"]
+        for r in ok:
+            line = f"  OK {r['path']}"
+            uri = _obsidian_uri(r['path'])
+            if uri:
+                line += f" — {uri}"
+            lines.append(line)
         for r in failed:
             lines.append(f"  FAIL {r['path']}: {r['error']}")
         return "\n".join(lines)
@@ -593,7 +611,12 @@ def move_file(file_path: str, destination: str) -> str:
 
         response.raise_for_status()
         data = response.json()
-        return f"Moved {data.get('from', file_path)} → {data.get('to', destination)}"
+        to_path = data.get('to', destination)
+        message = f"Moved {data.get('from', file_path)} → {to_path}"
+        uri = _obsidian_uri(to_path)
+        if uri:
+            message += f"\nURL: {uri}"
+        return message
     except httpx.HTTPStatusError as e:
         return f"Error: {e}"
     except Exception as e:

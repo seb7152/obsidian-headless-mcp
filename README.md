@@ -571,17 +571,17 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 |------|-------------|
 | `read_file(file_path)` | Read a markdown file; returns full content |
 | `write_file(file_path, content)` | Write or create a file (full replace); response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
-| `append_to_file(file_path, content)` | Append content at end of file |
+| `append_to_file(file_path, content)` | Append content at end of file (creates it if missing); response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
 | `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found; response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
-| `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically |
+| `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically; response includes an `obsidian://open` deep link to the new path when `VAULT_NAME` is set |
 | `delete_file(file_path, hard=False)` | Delete a file — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
 
 #### Frontmatter
 
 | Tool | Description |
 |------|-------------|
-| `update_frontmatter(file_path, updates)` | Merge-update frontmatter fields; body untouched; set a value to `null` to delete a field |
-| `bulk_update_frontmatter(file_paths, updates)` | Apply the same frontmatter patch to multiple files (up to 100) |
+| `update_frontmatter(file_path, updates)` | Merge-update frontmatter fields; body untouched; set a value to `null` to delete a field; response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
+| `bulk_update_frontmatter(file_paths, updates)` | Apply the same frontmatter patch to multiple files (up to 100); each succeeded file's line includes an `obsidian://open` deep link when `VAULT_NAME` is set |
 
 #### Directory & Search
 
