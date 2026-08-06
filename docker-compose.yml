@@ -87,6 +87,7 @@ services:
       - OBSIDIAN_API_URL=http://obsidian-api:3000/api
       - API_TOKEN=${API_TOKEN}
       - PORT=3001
+      - VAULT_NAME=${VAULT_NAME}
       - MCP_PUBLIC_URL=https://mcp.${DOMAIN}
       - ZITADEL_ISSUER=${ZITADEL_ISSUER:-https://zitadel-k9z6.srv828065.hstgr.cloud}
       - OAUTH_REQUIRED_ROLE=${OAUTH_REQUIRED_ROLE:-obsidian:access}

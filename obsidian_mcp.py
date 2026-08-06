@@ -3,6 +3,7 @@
 import httpx
 import os
 import re
+from urllib.parse import quote
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -10,6 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
 PORT = int(os.getenv("PORT", 3001))
 API_TOKEN = os.getenv("API_TOKEN", "")
+VAULT_NAME = os.getenv("VAULT_NAME", "")
 
 # OAuth 2.1 resource-server configuration (Zitadel) — see AuthMiddleware below
 ZITADEL_ISSUER = os.getenv("ZITADEL_ISSUER", "https://zitadel-k9z6.srv828065.hstgr.cloud")
@@ -72,6 +74,18 @@ def _parse_comment_threads(content: str) -> list[dict]:
         })
 
     return comments
+
+
+def _obsidian_uri(file_path: str) -> str | None:
+    """Build an obsidian://open deep link for a vault-relative file path.
+
+    Returns None when VAULT_NAME isn't configured, since the link would be
+    missing its vault and unusable.
+    """
+    if not VAULT_NAME:
+        return None
+    path_without_ext = re.sub(r"\.md$", "", file_path)
+    return f"obsidian://open?vault={quote(VAULT_NAME, safe='')}&file={quote(path_without_ext, safe='')}"
 
 
 # ==================== RESOURCES ====================
@@ -157,7 +171,11 @@ def write_file(file_path: str, content: str) -> str:
             json={"content": content}
         )
         response.raise_for_status()
-        return f"File saved successfully: {file_path}"
+        message = f"File saved successfully: {file_path}"
+        uri = _obsidian_uri(file_path)
+        if uri:
+            message += f"\nURL: {uri}"
+        return message
     except Exception as e:
         return f"Error writing file: {e}"
 
@@ -536,7 +554,11 @@ def patch_file(file_path: str, old_text: str, new_text: str, replace_all: bool =
         response.raise_for_status()
         data = response.json()
         count = data.get("replacements", 0)
-        return f"Patched {file_path} ({count} replacement{'s' if count != 1 else ''})"
+        message = f"Patched {file_path} ({count} replacement{'s' if count != 1 else ''})"
+        uri = _obsidian_uri(file_path)
+        if uri:
+            message += f"\nURL: {uri}"
+        return message
     except httpx.HTTPStatusError as e:
         return f"Error: {e}"
     except Exception as e:
