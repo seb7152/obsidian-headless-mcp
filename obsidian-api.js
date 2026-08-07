@@ -179,11 +179,12 @@ function fuzzySuggest(target, { byName }, maxResults = 3) {
     .map(({ paths }) => paths[0]);
 }
 
-// Helper: resolve every [[wikilink]] in body against the vault index
+// Helper: resolve every [[wikilink]] against the vault index — call with full
+// file content (frontmatter + body) so links inside frontmatter fields are caught too.
 // Optional suggest: attach up to 3 fuzzy suggestions to unresolved links
-function resolveAllWikilinks(body, { suggest = false } = {}) {
+function resolveAllWikilinks(text, { suggest = false } = {}) {
   const index = buildNoteIndex();
-  return parseWikilinks(body).map(({ raw, target }) => {
+  return parseWikilinks(text).map(({ raw, target }) => {
     const { exists, resolved, ambiguous } = resolveWikilink(target, index);
     const entry = { raw, target, exists, resolved };
     if (ambiguous) entry.ambiguous = ambiguous;
@@ -289,9 +290,8 @@ app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
 
     const suggest = req.query.suggest === 'true';
     const content = fs.readFileSync(filePath, 'utf-8');
-    const { body } = parseFrontmatter(content);
 
-    const allLinks = resolveAllWikilinks(body, { suggest });
+    const allLinks = resolveAllWikilinks(content, { suggest });
     const brokenLinks = allLinks
       .filter(({ exists }) => !exists)
       .map(({ raw, target, suggestions }) => suggestions ? { raw, target, suggestions } : { raw, target });
@@ -333,7 +333,7 @@ app.get(/^\/api\/file\/(.+)$/, (req, res) => {
       content
     };
     if (req.query.resolve_links === 'true') {
-      response.wikilinks = resolveAllWikilinks(body);
+      response.wikilinks = resolveAllWikilinks(content);
     }
 
     res.json(response);
