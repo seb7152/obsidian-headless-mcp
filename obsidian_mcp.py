@@ -88,6 +88,32 @@ def _obsidian_uri(file_path: str) -> str | None:
     return f"obsidian://open?vault={quote(VAULT_NAME, safe='')}&file={quote(path_without_ext, safe='')}"
 
 
+def _wikilink_warning(file_path: str) -> str | None:
+    """Check a just-written file for broken [[wikilinks]] via GET /file/{path}/links.
+
+    Returns a human-readable warning listing each broken link (with fuzzy-matched
+    suggestions when available), or None if the file has no broken links. Silently
+    returns None on any request error — a failed link check shouldn't break the
+    write/patch response it's attached to.
+    """
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}/links", params={"suggest": "true"})
+        response.raise_for_status()
+        broken = response.json().get("broken_links", [])
+        if not broken:
+            return None
+        lines = [f"⚠ {len(broken)} broken wikilink{'s' if len(broken) != 1 else ''}:"]
+        for link in broken:
+            line = f"  [[{link['raw']}]]"
+            suggestions = link.get("suggestions")
+            if suggestions:
+                line += f" — did you mean: {', '.join(suggestions)}?"
+            lines.append(line)
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
 # ==================== RESOURCES ====================
 
 @mcp.resource("obsidian://files")
@@ -175,6 +201,9 @@ def write_file(file_path: str, content: str) -> str:
         uri = _obsidian_uri(file_path)
         if uri:
             message += f"\nURL: {uri}"
+        warning = _wikilink_warning(file_path)
+        if warning:
+            message += f"\n{warning}"
         return message
     except Exception as e:
         return f"Error writing file: {e}"
@@ -204,6 +233,9 @@ def append_to_file(file_path: str, content: str) -> str:
         uri = _obsidian_uri(file_path)
         if uri:
             message += f"\nURL: {uri}"
+        warning = _wikilink_warning(file_path)
+        if warning:
+            message += f"\n{warning}"
         return message
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 404:
@@ -217,6 +249,9 @@ def append_to_file(file_path: str, content: str) -> str:
             uri = _obsidian_uri(file_path)
             if uri:
                 message += f"\nURL: {uri}"
+            warning = _wikilink_warning(file_path)
+            if warning:
+                message += f"\n{warning}"
             return message
         return f"Error appending: {e}"
     except Exception as e:
@@ -576,6 +611,9 @@ def patch_file(file_path: str, old_text: str, new_text: str, replace_all: bool =
         uri = _obsidian_uri(file_path)
         if uri:
             message += f"\nURL: {uri}"
+        warning = _wikilink_warning(file_path)
+        if warning:
+            message += f"\n{warning}"
         return message
     except httpx.HTTPStatusError as e:
         return f"Error: {e}"

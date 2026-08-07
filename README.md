@@ -570,9 +570,9 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 | Tool | Description |
 |------|-------------|
 | `read_file(file_path)` | Read a markdown file; returns full content |
-| `write_file(file_path, content)` | Write or create a file (full replace); response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
-| `append_to_file(file_path, content)` | Append content at end of file (creates it if missing); response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
-| `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found; response includes an `obsidian://open` deep link when `VAULT_NAME` is set |
+| `write_file(file_path, content)` | Write or create a file (full replace); response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) left in the file |
+| `append_to_file(file_path, content)` | Append content at end of file (creates it if missing); response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) left in the file |
+| `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found; response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) left in the file |
 | `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically; response includes an `obsidian://open` deep link to the new path when `VAULT_NAME` is set |
 | `delete_file(file_path, hard=False)` | Delete a file — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
 
