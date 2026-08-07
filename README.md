@@ -185,6 +185,7 @@ curl -H "Authorization: Bearer $TOKEN" \
   "https://obsidian-api.yourdomain.com/api/file/notes%2Fmy-note.md/links?suggest=true"
 # → {"path":"notes/my-note.md","count":5,"broken_count":1,"broken_links":[{"raw":"...","target":"...","suggestions":["..."]}]}
 ```
+Scans the whole file, frontmatter included — a `related: "[[Note]]"` field is checked the same as a `[[Note]]` in the body.
 
 ### Files — bulk operations
 
