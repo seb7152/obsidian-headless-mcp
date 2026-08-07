@@ -88,16 +88,20 @@ def _obsidian_uri(file_path: str) -> str | None:
     return f"obsidian://open?vault={quote(VAULT_NAME, safe='')}&file={quote(path_without_ext, safe='')}"
 
 
-def _wikilink_warning(file_path: str) -> str | None:
-    """Check a just-written file for broken [[wikilinks]] via GET /file/{path}/links.
+def _wikilink_warning(text: str) -> str | None:
+    """Check a piece of text for broken [[wikilinks]] via POST /links/check.
+
+    Scoped to just the text that changed (e.g. a patch's new_text, or content
+    about to be appended) rather than the whole file, so the warning reflects
+    only what the current write/patch/append actually introduced.
 
     Returns a human-readable warning listing each broken link (with fuzzy-matched
-    suggestions when available), or None if the file has no broken links. Silently
+    suggestions when available), or None if the text has no broken links. Silently
     returns None on any request error — a failed link check shouldn't break the
     write/patch response it's attached to.
     """
     try:
-        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}/links", params={"suggest": "true"})
+        response = api_client.post(f"{OBSIDIAN_API_URL}/links/check", json={"text": text, "suggest": True})
         response.raise_for_status()
         broken = response.json().get("broken_links", [])
         if not broken:
@@ -201,7 +205,7 @@ def write_file(file_path: str, content: str) -> str:
         uri = _obsidian_uri(file_path)
         if uri:
             message += f"\nURL: {uri}"
-        warning = _wikilink_warning(file_path)
+        warning = _wikilink_warning(content)
         if warning:
             message += f"\n{warning}"
         return message
@@ -233,7 +237,7 @@ def append_to_file(file_path: str, content: str) -> str:
         uri = _obsidian_uri(file_path)
         if uri:
             message += f"\nURL: {uri}"
-        warning = _wikilink_warning(file_path)
+        warning = _wikilink_warning(content)
         if warning:
             message += f"\n{warning}"
         return message
@@ -249,7 +253,7 @@ def append_to_file(file_path: str, content: str) -> str:
             uri = _obsidian_uri(file_path)
             if uri:
                 message += f"\nURL: {uri}"
-            warning = _wikilink_warning(file_path)
+            warning = _wikilink_warning(content)
             if warning:
                 message += f"\n{warning}"
             return message
@@ -611,7 +615,7 @@ def patch_file(file_path: str, old_text: str, new_text: str, replace_all: bool =
         uri = _obsidian_uri(file_path)
         if uri:
             message += f"\nURL: {uri}"
-        warning = _wikilink_warning(file_path)
+        warning = _wikilink_warning(new_text)
         if warning:
             message += f"\n{warning}"
         return message

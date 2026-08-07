@@ -105,7 +105,8 @@ curl https://obsidian-api.yourdomain.com/health
 | `POST` | `/api/file/{path}/append` | Append content at end of file |
 | `POST` | `/api/file/{path}/move` | Move file to a new path |
 | `DELETE` | `/api/file/{path}` | Delete a file — soft by default (moved to `.trash/`); `?hard=true` removes it permanently |
-| `GET` | `/api/file/{path}/links` | List broken wikilinks (optionally with fuzzy suggestions) |
+| `GET` | `/api/file/{path}/links` | List broken wikilinks in a file (optionally with fuzzy suggestions) |
+| `POST` | `/api/links/check` | List broken wikilinks in an arbitrary text snippet — not tied to a file, for checking just-changed text |
 
 **Read a file**
 ```bash
@@ -186,6 +187,14 @@ curl -H "Authorization: Bearer $TOKEN" \
 # → {"path":"notes/my-note.md","count":5,"broken_count":1,"broken_links":[{"raw":"...","target":"...","suggestions":["..."]}]}
 ```
 Scans the whole file, frontmatter included — a `related: "[[Note]]"` field is checked the same as a `[[Note]]` in the body.
+
+To check a text snippet instead of a file on disk (e.g. before writing it):
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"text": "See [[Some Note]]", "suggest": true}' \
+  https://obsidian-api.yourdomain.com/api/links/check
+# → {"count":1,"broken_count":0}
+```
 
 ### Files — bulk operations
 
@@ -571,9 +580,9 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 | Tool | Description |
 |------|-------------|
 | `read_file(file_path)` | Read a markdown file; returns full content |
-| `write_file(file_path, content)` | Write or create a file (full replace); response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) left in the file |
-| `append_to_file(file_path, content)` | Append content at end of file (creates it if missing); response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) left in the file |
-| `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found; response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) left in the file |
+| `write_file(file_path, content)` | Write or create a file (full replace); response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) found in `content` |
+| `append_to_file(file_path, content)` | Append content at end of file (creates it if missing); response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) found in the appended `content` — pre-existing broken links elsewhere in the file aren't reported |
+| `patch_file(file_path, old_text, new_text, replace_all=False)` | Surgical text replacement — swaps `old_text` for `new_text` (first occurrence, or all with `replace_all=True`); errors if not found; response includes an `obsidian://open` deep link when `VAULT_NAME` is set, and a warning listing any broken `[[wikilinks]]` (with fuzzy suggestions) found in `new_text` — pre-existing broken links elsewhere in the file aren't reported |
 | `move_file(file_path, destination)` | Move or rename a file within the vault; missing destination folders are created automatically; response includes an `obsidian://open` deep link to the new path when `VAULT_NAME` is set |
 | `delete_file(file_path, hard=False)` | Delete a file — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
 

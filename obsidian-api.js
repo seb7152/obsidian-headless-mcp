@@ -309,6 +309,34 @@ app.get(/^\/api\/file\/(.+)\/links$/, (req, res) => {
   }
 });
 
+// Check wikilinks in an arbitrary text snippet against the vault index — not tied to a
+// file on disk. Lets a caller scope link validation to just-changed text (e.g. a patch's
+// new_text, or content about to be appended) instead of re-scanning the whole file.
+// Optional body field suggest: attach up to 3 fuzzy suggestions per broken link
+app.post('/api/links/check', (req, res) => {
+  try {
+    const { text, suggest } = req.body || {};
+    if (typeof text !== 'string') {
+      return res.status(400).json({ error: 'text (string) is required' });
+    }
+
+    const allLinks = resolveAllWikilinks(text, { suggest: suggest === true });
+    const brokenLinks = allLinks
+      .filter(({ exists }) => !exists)
+      .map(({ raw, target, suggestions }) => suggestions ? { raw, target, suggestions } : { raw, target });
+
+    const response = {
+      count: allLinks.length,
+      broken_count: brokenLinks.length
+    };
+    if (brokenLinks.length > 0) response.broken_links = brokenLinks;
+
+    res.json(response);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Read a file with parsed frontmatter
 app.get(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
