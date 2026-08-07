@@ -432,6 +432,31 @@ app.post(/^\/api\/file\/(.+)\/append$/, (req, res) => {
   }
 });
 
+// Move a single file
+// Body: { "destination": "new/path/to/file.md" }
+// MUST come before the generic /api/file/{path} POST route — otherwise its
+// (.+) swallows ".../move" as a literal filename to write.
+app.post(/^\/api\/file\/(.+)\/move$/, (req, res) => {
+  try {
+    const srcPath = path.join(VAULT_PATH, req.params[0]);
+    if (!srcPath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied' });
+    if (!fs.existsSync(srcPath)) return res.status(404).json({ error: 'File not found' });
+
+    const { destination } = req.body;
+    if (!destination) return res.status(400).json({ error: '"destination" is required' });
+
+    const destPath = path.join(VAULT_PATH, destination);
+    if (!destPath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied: destination' });
+
+    fs.mkdirSync(path.dirname(destPath), { recursive: true });
+    fs.renameSync(srcPath, destPath);
+
+    res.json({ success: true, from: req.params[0], to: destination });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create or write a complete file
 app.post(/^\/api\/file\/(.+)$/, (req, res) => {
   try {
@@ -482,29 +507,6 @@ app.patch(/^\/api\/file\/(.+)\/body$/, (req, res) => {
 
     fs.writeFileSync(filePath, newContent, 'utf-8');
     res.json({ success: true, path: req.params[0] });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Move a single file
-// Body: { "destination": "new/path/to/file.md" }
-app.post(/^\/api\/file\/(.+)\/move$/, (req, res) => {
-  try {
-    const srcPath = path.join(VAULT_PATH, req.params[0]);
-    if (!srcPath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied' });
-    if (!fs.existsSync(srcPath)) return res.status(404).json({ error: 'File not found' });
-
-    const { destination } = req.body;
-    if (!destination) return res.status(400).json({ error: '"destination" is required' });
-
-    const destPath = path.join(VAULT_PATH, destination);
-    if (!destPath.startsWith(VAULT_PREFIX)) return res.status(403).json({ error: 'Access denied: destination' });
-
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-    fs.renameSync(srcPath, destPath);
-
-    res.json({ success: true, from: req.params[0], to: destination });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
