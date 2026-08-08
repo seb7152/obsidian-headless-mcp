@@ -187,12 +187,31 @@ function lastKnownFrontmatter(rel) {
   }
 }
 
-function fullReindex() {
-  console.log('[indexer] Full reindex starting…');
-  const files = walkMd(VAULT_PATH);
-  db.transaction(() => files.forEach(indexFile))();
-  console.log(`[indexer] Indexed ${files.length} files`);
-  recordEvent('full_reindex', null);
+// Catches up the index with the vault on every startup — not just when the DB
+// is empty. The watcher can silently stop picking up events (e.g. inotify not
+// propagating across Docker bind mounts) between restarts, so files added
+// while it was down would otherwise stay missing from the index forever.
+function reconcile() {
+  console.log('[indexer] Reconciling index with vault…');
+  const vaultRelPaths = new Set(walkMd(VAULT_PATH).map(f => path.relative(VAULT_PATH, f)));
+  const dbRelPaths = new Set(db.prepare('SELECT path FROM files').all().map(r => r.path));
+
+  let added = 0, removed = 0;
+  for (const rel of dbRelPaths) {
+    if (!vaultRelPaths.has(rel)) {
+      stmtDeleteFile.run(rel);
+      removed++;
+    }
+  }
+  for (const rel of vaultRelPaths) {
+    if (!dbRelPaths.has(rel)) {
+      indexFile(path.join(VAULT_PATH, rel));
+      added++;
+    }
+  }
+
+  console.log(`[indexer] Reconciled: ${added} file(s) caught up, ${removed} stale entry(ies) removed (${vaultRelPaths.size} in vault)`);
+  recordEvent('reconcile', null);
 }
 
 function startWatcher() {
@@ -250,10 +269,8 @@ function startWatcher() {
   console.log(`[indexer] Watching for changes… (polling: ${watchOptions.usePolling ? 'on' : 'off'})`);
 }
 
-// Bootstrap: full reindex only if DB is empty
-if (db.prepare('SELECT COUNT(*) as c FROM files').get().c === 0) {
-  fullReindex();
-}
+// Bootstrap: reconcile against the vault on every startup (see reconcile() above).
+reconcile();
 startWatcher();
 
-module.exports = { db, indexFile, removeFile, getIndexerStatus };
+module.exports = { db, indexFile, removeFile, getIndexerStatus, walkMd };
