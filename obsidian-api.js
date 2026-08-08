@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
-const { db: vaultDb, getIndexerStatus } = require('./vault-indexer');
+const { db: vaultDb, getIndexerStatus, walkMd } = require('./vault-indexer');
 const webhooks = require('./webhooks');
 
 const app = express();
@@ -1127,8 +1127,10 @@ app.get('/api/sync/status', (req, res) => {
   // across Docker bind mounts), leaving the index stale without any error.
   try {
     const indexer = getIndexerStatus();
-    const vaultFileCount = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
-      .stdout.split('\n').filter(f => f).length;
+    // Use the indexer's own walkMd (skips dotfiles/dirs like .trash, .obsidian)
+    // so this count matches what's actually indexable — a raw `find` over all
+    // *.md files counted trashed notes too, producing a permanent false mismatch.
+    const vaultFileCount = walkMd(VAULT_PATH).length;
 
     response.indexer = {
       ...indexer,
