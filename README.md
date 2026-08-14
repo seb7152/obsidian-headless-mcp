@@ -619,6 +619,18 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 | `sync_vault()` | Trigger vault sync with Obsidian Sync |
 | `get_sync_status()` | Get current sync status, plus SQLite index / file watcher health (watcher liveness, last event, last error, indexed vs actual file count) |
 
+#### Comments
+
+Read and write [Document Comments](https://github.com/kylemcd/obsidian-document-comments) plugin threads directly in markdown — output is fully compatible with the plugin (created/edited here shows up and is editable in Obsidian, and vice versa). A thread is an anchor span `<!--c:ID-->text<!--/c:ID-->` wrapping the commented passage, plus a block `<!--co:ID by:author at:timestamp status:open|resolved quote:"..."` followed by one reply line per participant, closed by `-->`.
+
+| Tool | Description |
+|------|-------------|
+| `extract_comments(file_path, file_paths, folder)` | Extract every comment thread from one or more files as JSON: `{"id", "status", "quote", "created_by", "created_at", "anchored_text", "replies": [{"author", "at", "text"}]}`. Provide exactly one of `file_path` / `file_paths` / `folder` (recursive) |
+| `create_comment(file_path, quote, text, author="agent")` | Create a new thread anchored to the first occurrence of `quote` (must match the file's text exactly); returns the new thread's `comment_id` |
+| `reply_to_comment(file_path, comment_id, text, author="agent")` | Append a reply to an existing thread without touching its status |
+| `set_comment_status(file_path, comment_id, resolved)` | Resolve (`resolved=True`, i.e. "close") or reopen (`resolved=False`) a thread; anchored text and replies are untouched |
+| `delete_comment(file_path, comment_id)` | Remove a thread entirely — anchor markers and thread block are deleted, the previously-anchored text is left in place as plain markdown |
+
 #### Webhooks (read-only)
 
 | Tool | Description |

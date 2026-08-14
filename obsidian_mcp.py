@@ -2,7 +2,9 @@
 
 import httpx
 import os
+import random
 import re
+from datetime import datetime, timezone
 from urllib.parse import quote
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -60,7 +62,7 @@ def _parse_comment_threads(content: str) -> list[dict]:
                 replies.append({
                     "author": reply_match.group(1),
                     "at": reply_match.group(2),
-                    "text": reply_match.group(3),
+                    "text": _unescape_entry_text(reply_match.group(3)),
                 })
 
         comments.append({
@@ -74,6 +76,80 @@ def _parse_comment_threads(content: str) -> list[dict]:
         })
 
     return comments
+
+
+# Generic version of _COMMENT_THREAD_RE used by the write tools below (create_comment,
+# reply_to_comment, set_comment_status, delete_comment): captures the raw header-line
+# remainder instead of assuming a fixed by:/at:/status:/quote: order, so edits round-trip
+# any header fields untouched (including ones this server doesn't otherwise parse, like the
+# plugin's code-comment `line:` attribute). A leading `\n` is included in the match when
+# present, so callers that delete the whole match also clean up the blank line it sat on.
+def _comment_block_pattern(comment_id: str) -> re.Pattern:
+    return re.compile(r'\n?<!--co:' + re.escape(comment_id) + r'(?![A-Za-z0-9])([^\n]*)\n([\s\S]*?)-->')
+
+
+_COMMENT_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+
+def _generate_comment_id(existing_ids: set) -> str:
+    """Generate a comment ID matching the plugin's own scheme: 5 lowercase alnum chars,
+    falling back to 8 if that space is exhausted (mirrors src/format/ids.ts)."""
+    for length in (5, 8):
+        for _ in range(1000):
+            candidate = "".join(random.choices(_COMMENT_ID_ALPHABET, k=length))
+            if candidate not in existing_ids:
+                return candidate
+    raise RuntimeError("Could not generate a unique comment id")
+
+
+def _now_iso() -> str:
+    """UTC timestamp matching the plugin's `new Date().toISOString()` (ms precision, Z suffix)."""
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _sanitize_token(s: str) -> str:
+    """Sanitize a `by:`/`at:` header token: collapse whitespace to `_`, break any `-->`
+    sequence so it can't prematurely close the comment block."""
+    s = re.sub(r"\s+", "_", s.strip())
+    return s.replace("-->", "--\u200b>")
+
+
+def _sanitize_quote(s: str) -> str:
+    """Sanitize text for the `quote:"..."` header field: collapse whitespace to single
+    spaces, swap `"` for `'` (the field's own delimiter), break `-->` sequences, trim."""
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.replace('"', "'")
+    return s.replace("-->", "--\u200b>")
+
+
+def _escape_entry_text(s: str) -> str:
+    """Escape a reply/comment body for storage as a single thread-entry line."""
+    return s.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
+
+
+def _unescape_entry_text(s: str) -> str:
+    """Inverse of _escape_entry_text — single-pass so `\\\\n` round-trips as a literal `\\n`."""
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s) and s[i + 1] in "nr\\":
+            out.append({"n": "\n", "r": "\r", "\\": "\\"}[s[i + 1]])
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _patch_request(file_path: str, old_text: str, new_text: str, replace_all: bool = False):
+    """Shared PATCH call backing patch_file and the comment write tools — a surgical,
+    atomic old_text -> new_text swap performed server-side (no read-modify-write race)."""
+    return api_client.patch(
+        f"{OBSIDIAN_API_URL}/file/{file_path}/patch",
+        json={"old_text": old_text, "new_text": new_text, "replace_all": replace_all}
+    )
 
 
 def _obsidian_uri(file_path: str) -> str | None:
@@ -596,10 +672,7 @@ def patch_file(file_path: str, old_text: str, new_text: str, replace_all: bool =
         replace_all: Replace every occurrence instead of just the first (default: False)
     """
     try:
-        response = api_client.patch(
-            f"{OBSIDIAN_API_URL}/file/{file_path}/patch",
-            json={"old_text": old_text, "new_text": new_text, "replace_all": replace_all}
-        )
+        response = _patch_request(file_path, old_text, new_text, replace_all)
 
         if response.status_code == 404:
             return f"File not found: {file_path}"
@@ -978,6 +1051,215 @@ def extract_comments(file_path: str = None, file_paths: list = None, folder: str
         return json.dumps({"error": f"Error: {e}"})
     except Exception as e:
         return json.dumps({"error": f"Error: {e}"})
+
+
+def _read_raw_content(file_path: str) -> tuple[str | None, str | None]:
+    """Fetch a file's raw content for the comment write tools. Returns (content, error) —
+    exactly one is None."""
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/file/{file_path}")
+        response.raise_for_status()
+        return response.json().get("content", ""), None
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            return None, f"File not found: {file_path}"
+        return None, f"Error reading file: {e}"
+    except Exception as e:
+        return None, f"Error: {e}"
+
+
+@mcp.tool()
+def create_comment(file_path: str, quote: str, text: str, author: str = "agent") -> str:
+    """Create a new Document Comment plugin thread anchored to a passage of text.
+
+    Wraps the first occurrence of `quote` with the plugin's anchor markers
+    (`<!--c:ID-->quote<!--/c:ID-->`) and inserts a comment thread block right after it,
+    producing output fully compatible with the Obsidian "Document Comments" plugin
+    (https://github.com/kylemcd/obsidian-document-comments) — threads created here show
+    up and are editable in the plugin, and vice versa.
+
+    `quote` must match the file's raw text exactly (including whitespace) — use
+    `read_file` first if unsure. If `quote` occurs more than once, only the first
+    occurrence is anchored; narrow the quote to target a different spot.
+
+    Returns the new thread's ID, which `reply_to_comment`, `set_comment_status`, and
+    `delete_comment` all take as `comment_id`.
+
+    Args:
+        file_path: Path to the file relative to vault root
+        quote: Exact text to anchor the comment to (must appear verbatim in the file)
+        text: The comment's text
+        author: Name to attribute the comment to (default: "agent")
+    """
+    content, error = _read_raw_content(file_path)
+    if error:
+        return error
+
+    occurrences = content.count(quote)
+    if occurrences == 0:
+        return f"Quote not found in {file_path} — it must match the file's text exactly"
+
+    existing_ids = set(re.findall(r"<!--(?:c|/c|co):([A-Za-z0-9]+)", content))
+    comment_id = _generate_comment_id(existing_ids)
+
+    author_token = _sanitize_token(author)
+    ts = _now_iso()
+    anchored = f"<!--c:{comment_id}-->{quote}<!--/c:{comment_id}-->"
+    body_block = (
+        f'<!--co:{comment_id} by:{author_token} at:{ts} status:open quote:"{_sanitize_quote(quote)}"\n'
+        f"{author_token} ({ts}): {_escape_entry_text(text)}\n"
+        f"-->"
+    )
+
+    try:
+        response = _patch_request(file_path, quote, f"{anchored}\n{body_block}", replace_all=False)
+        if response.status_code == 404:
+            return f"File not found: {file_path}"
+        if response.status_code == 422:
+            return f"Quote not found in {file_path} — it must match the file's text exactly"
+        response.raise_for_status()
+    except Exception as e:
+        return f"Error creating comment: {e}"
+
+    message = f"Comment created in {file_path} (id: {comment_id})"
+    if occurrences > 1:
+        message += f"\nNote: quote appeared {occurrences} times — anchored to the first occurrence"
+    uri = _obsidian_uri(file_path)
+    if uri:
+        message += f"\nURL: {uri}"
+    return message
+
+
+@mcp.tool()
+def reply_to_comment(file_path: str, comment_id: str, text: str, author: str = "agent") -> str:
+    """Add a reply to an existing Document Comment plugin thread.
+
+    Appends a new entry to the thread in place — the plugin renders entries in order,
+    most recent last. Does not change the thread's status; use `set_comment_status` to
+    resolve or reopen it.
+
+    Args:
+        file_path: Path to the file relative to vault root
+        comment_id: The thread's ID, as returned by create_comment or extract_comments
+        text: The reply text
+        author: Name to attribute the reply to (default: "agent")
+    """
+    content, error = _read_raw_content(file_path)
+    if error:
+        return error
+
+    match = _comment_block_pattern(comment_id).search(content)
+    if not match:
+        return f"Comment not found: {comment_id} in {file_path}"
+
+    leading_nl = "\n" if match.group(0).startswith("\n") else ""
+    header_rest, body = match.group(1), match.group(2)
+
+    author_token = _sanitize_token(author)
+    entry_line = f"{author_token} ({_now_iso()}): {_escape_entry_text(text)}"
+    stripped_body = body.strip("\n")
+    new_body = f"{stripped_body}\n{entry_line}\n" if stripped_body else f"{entry_line}\n"
+    new_block = f"{leading_nl}<!--co:{comment_id}{header_rest}\n{new_body}-->"
+
+    try:
+        response = _patch_request(file_path, match.group(0), new_block, replace_all=False)
+        response.raise_for_status()
+    except Exception as e:
+        return f"Error replying to comment: {e}"
+
+    message = f"Reply added to comment {comment_id} in {file_path}"
+    uri = _obsidian_uri(file_path)
+    if uri:
+        message += f"\nURL: {uri}"
+    return message
+
+
+@mcp.tool()
+def set_comment_status(file_path: str, comment_id: str, resolved: bool) -> str:
+    """Resolve or reopen a Document Comment plugin thread — this is how the plugin
+    represents "closing" a comment.
+
+    Only the thread's status changes; the anchored text, its quote, and every reply are
+    left untouched (matching the plugin's own resolve/reopen toggle). To remove a thread
+    entirely instead, use `delete_comment`.
+
+    Args:
+        file_path: Path to the file relative to vault root
+        comment_id: The thread's ID, as returned by create_comment or extract_comments
+        resolved: True to mark the thread resolved ("closed"), False to reopen it
+    """
+    content, error = _read_raw_content(file_path)
+    if error:
+        return error
+
+    match = _comment_block_pattern(comment_id).search(content)
+    if not match:
+        return f"Comment not found: {comment_id} in {file_path}"
+
+    leading_nl = "\n" if match.group(0).startswith("\n") else ""
+    header_rest, body = match.group(1), match.group(2)
+    new_status = "resolved" if resolved else "open"
+    currently_resolved = bool(re.search(r"status:resolved(?:\s|$)", header_rest))
+    if currently_resolved == resolved:
+        return f"Comment {comment_id} in {file_path} is already {new_status}"
+
+    if re.search(r"status:\S+", header_rest):
+        new_header_rest = re.sub(r"status:\S+", f"status:{new_status}", header_rest, count=1)
+    else:
+        new_header_rest = header_rest + f" status:{new_status}"
+    new_block = f"{leading_nl}<!--co:{comment_id}{new_header_rest}\n{body}-->"
+
+    try:
+        response = _patch_request(file_path, match.group(0), new_block, replace_all=False)
+        response.raise_for_status()
+    except Exception as e:
+        return f"Error updating comment status: {e}"
+
+    message = f"Comment {comment_id} in {file_path} marked {new_status}"
+    uri = _obsidian_uri(file_path)
+    if uri:
+        message += f"\nURL: {uri}"
+    return message
+
+
+@mcp.tool()
+def delete_comment(file_path: str, comment_id: str) -> str:
+    """Delete a Document Comment plugin thread entirely.
+
+    Removes the anchor markers and the whole thread block, leaving the previously
+    anchored text in place as plain markdown — matching the plugin's own delete
+    behavior. This cannot be undone; to close a thread without losing its history, use
+    `set_comment_status` instead.
+
+    Args:
+        file_path: Path to the file relative to vault root
+        comment_id: The thread's ID, as returned by create_comment or extract_comments
+    """
+    content, error = _read_raw_content(file_path)
+    if error:
+        return error
+
+    open_tag = f"<!--c:{comment_id}-->"
+    close_tag = f"<!--/c:{comment_id}-->"
+    body_pattern = _comment_block_pattern(comment_id)
+
+    if open_tag not in content and close_tag not in content and not body_pattern.search(content):
+        return f"Comment not found: {comment_id} in {file_path}"
+
+    new_content = body_pattern.sub("", content)
+    new_content = new_content.replace(open_tag, "").replace(close_tag, "")
+
+    try:
+        response = api_client.post(f"{OBSIDIAN_API_URL}/file/{file_path}", json={"content": new_content})
+        response.raise_for_status()
+    except Exception as e:
+        return f"Error deleting comment: {e}"
+
+    message = f"Comment {comment_id} deleted from {file_path}"
+    uri = _obsidian_uri(file_path)
+    if uri:
+        message += f"\nURL: {uri}"
+    return message
 
 
 @mcp.tool()
