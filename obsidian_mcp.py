@@ -439,7 +439,7 @@ def list_directory(dir_path: str = "") -> str:
 
 
 @mcp.tool()
-def create_folders(folder_paths: list) -> str:
+def create_folders(folder_paths: list[str]) -> str:
     """Create one or more folders in the vault, including any missing parent folders.
 
     Useful for scaffolding a directory structure in one call — e.g. a project
@@ -477,7 +477,7 @@ def create_folders(folder_paths: list) -> str:
 
 
 @mcp.tool()
-def delete_folders(folder_paths: list, hard: bool = False) -> str:
+def delete_folders(folder_paths: list[str], hard: bool = False) -> str:
     """Delete one or more folders from the vault, recursively.
 
     By default this is a SOFT delete: each folder tree is moved to a hidden
@@ -521,7 +521,7 @@ def delete_folders(folder_paths: list, hard: bool = False) -> str:
 
 
 @mcp.tool()
-def move_folders(moves: list) -> str:
+def move_folders(moves: list[dict[str, str]]) -> str:
     """Move or rename one or more folders within the vault.
 
     Each entry renames/relocates one folder to its own destination — use this
@@ -614,7 +614,7 @@ def update_frontmatter(file_path: str, updates: dict) -> str:
 
 
 @mcp.tool()
-def bulk_update_frontmatter(file_paths: list, updates: dict) -> str:
+def bulk_update_frontmatter(file_paths: list[str], updates: dict) -> str:
     """Apply the same frontmatter changes to multiple files at once.
 
     Merges `updates` into the frontmatter of every file in `file_paths`.
@@ -965,7 +965,7 @@ def extract_tasks(file_path: str, isolate_tags: bool = False) -> str:
 
 
 @mcp.tool()
-def extract_comments(file_path: str = None, file_paths: list = None, folder: str = None) -> str:
+def extract_comments(file_path: str = None, file_paths: list[str] = None, folder: str = None) -> str:
     """Extract Document Comment plugin comment threads from one or more files, as JSON.
 
     Provide exactly one of:
