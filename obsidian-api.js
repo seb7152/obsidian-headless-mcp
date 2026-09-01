@@ -1033,10 +1033,10 @@ app.get('/api/search', (req, res) => {
   }
 });
 
-// List all project folders from 20_Projects/
+// List all project folders from 20_Projects/Pro/
 app.get('/api/projects', (req, res) => {
   try {
-    const projectsDir = path.join(VAULT_PATH, '20_Projects');
+    const projectsDir = path.join(VAULT_PATH, '20_Projects', 'Pro');
 
     if (!fs.existsSync(projectsDir)) {
       return res.json({ projects: [], count: 0 });
@@ -1052,7 +1052,7 @@ app.get('/api/projects', (req, res) => {
       })
       .map(name => ({
         name,
-        path: path.join('20_Projects', name)
+        path: path.join('20_Projects', 'Pro', name)
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 

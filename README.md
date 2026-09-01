@@ -389,12 +389,12 @@ SELECT path, json_extract(frontmatter, '$.priority') AS priority FROM files
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/projects` | List all subdirectories of `20_Projects/` |
+| `GET` | `/api/projects` | List all subdirectories of `20_Projects/Pro/` |
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
   https://obsidian-api.yourdomain.com/api/projects
-# → {"projects":[{"name":"ProjectA","path":"20_Projects/ProjectA"}],"count":3}
+# → {"projects":[{"name":"ProjectA","path":"20_Projects/Pro/ProjectA"}],"count":3}
 ```
 
 ### Agent Context
@@ -602,7 +602,7 @@ in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (
 | `move_folders(moves)` | Move or rename one or more folders (up to 100); each entry is its own `{"from": ..., "to": ...}` dict — missing destination parent folders are created automatically |
 | `list_directory(dir_path)` | List files and subdirectories; leave `dir_path` empty for vault root |
 | `search_vault(query, fuzzy, since, before)` | Search vault — keyword (default) or fuzzy with date filters |
-| `get_projects()` | List project folders under `20_Projects/` |
+| `get_projects()` | List project folders under `20_Projects/Pro/` |
 
 #### SQL & Index
 

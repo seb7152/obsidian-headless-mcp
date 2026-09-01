@@ -560,7 +560,7 @@ def move_folders(moves: list[dict[str, str]]) -> str:
 
 @mcp.tool()
 def get_projects() -> str:
-    """Get all project folders from the 20_Projects directory, with their vault path.
+    """Get all project folders from the 20_Projects/Pro directory, with their vault path.
 
     Returns a list of project names and their paths relative to the vault root.
     """
@@ -571,7 +571,7 @@ def get_projects() -> str:
         projects = data.get("projects", [])
 
         if not projects:
-            return "No projects found in 20_Projects/"
+            return "No projects found in 20_Projects/Pro/"
 
         output = f"Projects ({len(projects)}):\n"
         for p in projects:
