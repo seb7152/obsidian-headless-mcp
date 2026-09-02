@@ -307,6 +307,7 @@ async function runEmbedWorker() {
   embedRunning = true;
   embedState.running = true;
   const model = embeddings.MODEL;
+  let retryLaterMs = null; // set below when a batch gives up but more work remains
   try {
     // Free win before spending anything: copy vectors across identical chunks.
     stmt.reuseByHash.run(model, model, model, model);
@@ -318,16 +319,17 @@ async function runEmbedWorker() {
 
       const texts = batch.map(c => [c.title, c.heading, c.content].filter(Boolean).join('\n'));
       let vectors = null;
+      let lastWasRetryable = false;
       for (let attempt = 1; attempt <= EMBED_RETRY_MAX_ATTEMPTS; attempt++) {
         try {
           vectors = await embeddings.embed(texts, 'passage');
           break;
         } catch (err) {
-          const retryable = err.status === 429 || (err.status >= 500 && err.status < 600);
-          if (!retryable || attempt === EMBED_RETRY_MAX_ATTEMPTS) {
+          lastWasRetryable = err.status === 429 || (err.status >= 500 && err.status < 600);
+          if (!lastWasRetryable || attempt === EMBED_RETRY_MAX_ATTEMPTS) {
             embedState.failed += batch.length;
             embedState.last_error = err.message;
-            console.error(`[search] embedding batch failed${retryable ? ' (out of retries)' : ''}: ${err.message}`);
+            console.error(`[search] embedding batch failed${lastWasRetryable ? ' (out of retries)' : ''}: ${err.message}`);
             break;
           }
           const delayMs = Math.min(err.retryAfterMs || EMBED_RETRY_BASE_MS * attempt, EMBED_RETRY_MAX_MS);
@@ -335,7 +337,27 @@ async function runEmbedWorker() {
           await sleep(delayMs);
         }
       }
-      if (!vectors) break; // gave up on this batch; the next schedule (or a manual reindex) resumes here
+      if (!vectors) {
+        if (lastWasRetryable) {
+          // Exhausted this batch's own retries, but the failure itself was
+          // transient (429/5xx) — the backfill as a whole isn't dead, just
+          // this one pass. Without rescheduling here, a single stubborn batch
+          // (a rate-limit window outlasting every attempt's backoff) would
+          // permanently stall everything after it, since nothing else calls
+          // runEmbedWorker() again on its own. scheduleEmbedding() itself
+          // no-ops while embedRunning is still true, so record the delay and
+          // call it after this pass ends instead of calling it right here.
+          retryLaterMs = EMBED_RETRY_MAX_MS;
+          console.error(`[search] giving up on this pass, ${stmt.countPending.get().c} chunk(s) still pending — rescheduling in ${Math.round(retryLaterMs / 1000)}s`);
+        } else {
+          // A hard failure (bad API key, malformed request, ...) will not fix
+          // itself by waiting — retrying it forever every EMBED_RETRY_MAX_MS
+          // would just spam the provider. Stop here; POST /api/search/reindex
+          // (after the real fix) or a restart is what resumes this.
+          console.error(`[search] embedding stopped: non-retryable error, ${stmt.countPending.get().c} chunk(s) still pending`);
+        }
+        break;
+      }
 
       const write = db.transaction(() => {
         vectors.forEach((vec, i) => {
@@ -358,6 +380,7 @@ async function runEmbedWorker() {
     embedRunning = false;
     embedState.running = false;
   }
+  if (retryLaterMs !== null) scheduleEmbedding(retryLaterMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -670,5 +693,14 @@ module.exports = {
   getStatus,
   scheduleEmbedding,
   runEmbedWorker,
-  _internal: { chunkMarkdown, splitSections, buildFtsQuery, fuseRRF, pickMatches, hashOf, normalizeForMatch }
+  _internal: {
+    chunkMarkdown, splitSections, buildFtsQuery, fuseRRF, pickMatches, hashOf, normalizeForMatch,
+    // Every indexChunks() call self-schedules a background embed pass, so a
+    // test that needs to observe scheduleEmbedding() actually arm a *fresh*
+    // timer (e.g. the give-up-then-reschedule path) has to clear whatever a
+    // prior indexChunks()/buildTestIndex() already left pending first.
+    _clearEmbedTimerForTests: () => {
+      if (embedTimer) { clearTimeout(embedTimer); embedTimer = null; }
+    }
+  }
 };

@@ -8,9 +8,12 @@
 const test = require('node:test');
 const assert = require('node:assert');
 
-// Must be set BEFORE requiring the modules: both read their provider at load.
+// Must be set BEFORE requiring the modules: both read their config at load.
 process.env.EMBED_PROVIDER = 'none';
 delete process.env.JINA_API_KEY;
+// The real default (60s) would make the reschedule-after-giving-up test slow;
+// this only shortens the *delay*, not the retry-attempt bound being tested.
+process.env.EMBED_RETRY_MAX_MS = '30';
 
 const Database = require('better-sqlite3');
 const searchIndex = require('./search-index');
@@ -428,4 +431,43 @@ test('embed worker: a non-retryable error (e.g. a bad key) gives up immediately'
 
   assert.equal(calls, 1, 'a 401 should not be retried at all');
   assert.equal(searchIndex.getStatus().embedded, 0);
+});
+
+test('embed worker: a batch that stays rate-limited past all retries reschedules itself', async () => {
+  // What actually happened in production: one batch outlasted every retry
+  // attempt's backoff, runEmbedWorker() returned, and — before this fix —
+  // nothing ever called it again. The whole backfill stalled until someone
+  // noticed and hit /api/search/reindex or restarted the container by hand.
+  buildTestIndex();
+  // buildTestIndex() already self-scheduled a (real, 5s-delayed) embed pass;
+  // clear it so the reschedule this test is actually checking for is the one
+  // runEmbedWorker() itself arms after giving up, not a coincidental one left
+  // over from setup.
+  searchIndex._internal._clearEmbedTimerForTests();
+
+  const origInit = embeddingsModule.init;
+  const origEmbed = embeddingsModule.embed;
+  let calls = 0;
+  embeddingsModule.init = async () => {};
+  embeddingsModule.embed = async () => {
+    calls++;
+    const err = new Error('still rate limited');
+    err.status = 429;
+    err.retryAfterMs = 1; // keep both the in-batch retries and the reschedule fast
+    throw err;
+  };
+
+  try {
+    await searchIndex.runEmbedWorker(); // exhausts its retries, then reschedules via scheduleEmbedding()
+    const callsAfterFirstPass = calls;
+
+    // The reschedule fires after EMBED_RETRY_MAX_MS (overridden to 30ms for
+    // this file) — wait past it and confirm the worker actually ran again on
+    // its own, without anything explicitly calling it a second time.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.ok(calls > callsAfterFirstPass, 'expected a rescheduled pass to call embed() again on its own');
+  } finally {
+    embeddingsModule.init = origInit;
+    embeddingsModule.embed = origEmbed;
+  }
 });
