@@ -26,16 +26,56 @@ one npm package to the install. **Without this edit the service will not start**
 **Replace it with:**
 
 ```
-    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && for f in obsidian-api.js vault-indexer.js webhooks.js search-index.js embeddings.js rerank.js; do cat /tmp/repo/$$f > /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
+    command: bash -c "set -e; mkdir -p /tmp/app && for f in obsidian-api.js vault-indexer.js webhooks.js search-index.js embeddings.js rerank.js; do curl -fsSL https://raw.githubusercontent.com/seb7152/obsidian-headless-mcp/main/$$f -o /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
 ```
 
-Two things that are easy to get wrong here:
+This also switches the fetch mechanism from `git clone` to a `curl` per file
+against `raw.githubusercontent.com` — see **Why not `git clone`** below before
+assuming the old line was just reformatted.
+
+Three things that are easy to get wrong here:
 
 - The `$$f` is doubled **on purpose**. Docker Compose interpolates `$f` as one of
   its own variables and would blank it out; `$$f` reaches bash as `$f`. This is
   the same escaping the `obsidian-headless` service already uses for
   `$$OBSIDIAN_EMAIL`.
 - Keep it on **one line**. Folding it introduces YAML quoting problems.
+- `set -e` matters here: `curl -f` fails loudly on a 4xx/5xx, but without `set -e`
+  a failed `curl -o dest` still creates an empty `dest` (the redirect happens
+  before curl runs) and the boot silently continues with a truncated file.
+
+### Why not `git clone`
+
+The original command did `git clone https://github.com/... /tmp/repo` then
+`cat`'d each file out of it. On the VPS this was first deployed to
+(`srv1119889`), that started failing with:
+
+```
+fatal: could not read Username for 'https://github.com': No such device or address
+fatal: expected flush after ref listing
+```
+
+Traced with `GIT_CURL_VERBOSE=1`: the anonymous `GET .../info/refs` succeeds
+(HTTP 200, full ref list), but the follow-up `POST .../git-upload-pack` — the
+step that actually transfers the pack data — comes back `401` with
+`www-authenticate: Basic realm="GitHub"`. Reproduced with a bare `node:22`
+container against a completely unrelated public repo
+(`octocat/Hello-World`), so it isn't specific to this repo or to anything in
+this codebase: **GitHub was rejecting anonymous `git-upload-pack` from that
+VPS's egress IP outright**, most likely anti-abuse flagging of a
+shared/reused hosting IP range — plausibly worsened by this exact deploy
+pattern (`restart: unless-stopped` re-cloning the *entire* repo, including
+`.git` history, on every single container boot/crash).
+
+`raw.githubusercontent.com` and `api.github.com` are unaffected — different
+service, different infra from `github.com`'s git-upload-pack endpoint. That's
+also why `obsidian-mcp`'s boot command (fetching `obsidian_mcp.py` via the
+`api.github.com` contents endpoint) never had this problem. Switching
+`obsidian-api` to the same family of fetch (one `curl` per file, no `.git`
+history, no git protocol at all) sidesteps the block entirely and is lighter
+on every boot regardless. If this ever needs to move to a private repo or a
+pinned ref, use `raw.githubusercontent.com/.../<sha-or-tag>/<file>` — same
+mechanism, just fetched at a fixed ref instead of `main`.
 
 ## Edit 2 — `environment:` (required)
 
@@ -96,7 +136,7 @@ First boot is slower than usual: `npm install` now pulls `onnxruntime-node`
 `huggingface.co` (~120 MB, once — it lands on the `/data` volume). The container
 needs outbound HTTPS to `huggingface.co` for that first download.
 
-Expected log sequence:
+Expected log sequence (`EMBED_PROVIDER=local`):
 
 ```
 [indexer] Reconciling index with vault…
@@ -109,6 +149,19 @@ Expected log sequence:
 ...
 [search] embedding index complete (5000 chunks)
 ```
+
+With `EMBED_PROVIDER=jina` there is no model download and no `[embeddings]
+ready` line before the first embed call — the last two lines above become the
+embed worker's own progress instead, and boot is immediate (no
+`onnxruntime-node`/`@huggingface/transformers` weight to load). If
+`JINA_API_KEY` is unset, boot still succeeds and search still works: the
+worker logs `[embeddings] unavailable: EMBED_PROVIDER=jina requires the
+matching API key env var — semantic search disabled, falling back to BM25`
+and stays that way, harmlessly, until the key is set and the container is
+recreated. That recreate is required, not optional: Docker fixes environment
+variables at container creation, so editing `.env` alone never reaches an
+already-running container — `POST /api/search/reindex` (see the README) only
+helps once the key is actually in the process's environment.
 
 The chunking pass is fast (seconds). The embedding backfill is the long part:
 **10–20 minutes** for this vault on 2 vCPU, running in the background. The API

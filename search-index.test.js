@@ -15,6 +15,7 @@ delete process.env.JINA_API_KEY;
 const Database = require('better-sqlite3');
 const searchIndex = require('./search-index');
 const reranker = require('./rerank');
+const embeddingsModule = require('./embeddings');
 
 const { chunkMarkdown, splitSections, buildFtsQuery, fuseRRF, pickMatches, hashOf } = searchIndex._internal;
 
@@ -179,6 +180,21 @@ test('pickMatches: truncates very long lines', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Embeddings init retry (no network: EMBED_PROVIDER=none always rejects)
+// ---------------------------------------------------------------------------
+
+test('embeddings: a failed init() is not cached forever - the next call retries', async () => {
+  const p1 = embeddingsModule.init();
+  await assert.rejects(p1);
+  const p2 = embeddingsModule.init();
+  // Before the fix, init() cached the rejected promise and every later caller
+  // (including POST /api/search/reindex) got the exact same stale failure
+  // back forever, even after whatever was wrong got fixed.
+  assert.notStrictEqual(p1, p2, 'second init() call returned the same cached rejection instead of retrying');
+  await assert.rejects(p2);
+});
+
+// ---------------------------------------------------------------------------
 // Reranker guards (no network: no API key is configured)
 // ---------------------------------------------------------------------------
 
@@ -245,11 +261,45 @@ test('integration: accent-insensitive and plural-tolerant matching', async () =>
   assert.equal(out.results[0].file, '20_Projects/reunions.md');
 });
 
-test('integration: mode=auto degrades to bm25 with a warning when embeddings are off', async () => {
+// Both messages search() can emit here end the same way regardless of whether
+// embeddings.init() has already run elsewhere in this process (it shares one
+// module-level state with every other test in this file, including the
+// init()-retry test above) — assert on that common tail rather than on which
+// of the two variants fired, which is exercised precisely by the two tests
+// further down ("not ready yet" vs a named config error).
+const SEMANTIC_UNAVAILABLE_RE = /answered with BM25 only/;
+
+test('integration: mode=hybrid degrades to bm25 with a warning when embeddings are off', async () => {
   buildTestIndex();
   const out = await searchIndex.search('budget', { mode: 'hybrid' });
   assert.equal(out.mode, 'bm25');
-  assert.ok(out.warnings.some(w => /semantic index not ready/.test(w)));
+  assert.ok(out.warnings.some(w => SEMANTIC_UNAVAILABLE_RE.test(w)), JSON.stringify(out.warnings));
+});
+
+test('integration: mode=auto (the default) also warns when semantic is not ready', async () => {
+  // 'auto' silently falling back used to skip the warning entirely — a caller
+  // that never named a mode still deserves to know it got keyword-only
+  // results, not just quietly worse recall.
+  buildTestIndex();
+  const out = await searchIndex.search('budget', {});
+  assert.equal(out.mode, 'bm25');
+  assert.ok(out.warnings.some(w => SEMANTIC_UNAVAILABLE_RE.test(w)), JSON.stringify(out.warnings));
+});
+
+test('integration: an explicit bm25/grep-style request is not nagged about semantic', async () => {
+  buildTestIndex();
+  const out = await searchIndex.search('budget', { mode: 'bm25' });
+  assert.deepEqual(out.warnings, []);
+});
+
+test('integration: a real embeddings config error is named in the warning, not just "not ready"', async () => {
+  buildTestIndex();
+  await embeddingsModule.init().catch(() => {}); // EMBED_PROVIDER=none -> populates state.error
+  const out = await searchIndex.search('budget', {});
+  assert.ok(
+    out.warnings.some(w => w.includes('semantic search unavailable') && w.includes('EMBED_PROVIDER=none')),
+    JSON.stringify(out.warnings)
+  );
 });
 
 test('integration: date and path filters restrict the result set', async () => {
