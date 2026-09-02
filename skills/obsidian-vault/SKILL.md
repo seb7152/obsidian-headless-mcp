@@ -13,7 +13,7 @@ exposed through the `obsidian` **MCP server** (primary) and a **REST API**
 
 > Structure and governance below reflect the vault as of **2026-09-02**. The
 > vault is the source of truth: when this file and the vault disagree, trust
-> `_system/Gouvernance/vault-structure.md` and say so.
+> `vault-structure.md` **at the vault root** and say so.
 
 ---
 
@@ -22,7 +22,8 @@ exposed through the `obsidian` **MCP server** (primary) and a **REST API**
 Order imposed by `CLAUDE.md` at the vault root:
 
 1. **`agent.md`** — entry point: identity, routing, key files
-2. **`_system/Gouvernance/vault-structure.md`** — full tree
+2. **`vault-structure.md` at the vault root** — full tree. (`CLAUDE.md` names
+   the `_system/Gouvernance/` copy instead; that one is stale — see below.)
 3. **`_system/Gouvernance/agent-rules.md`** — permissions, prohibitions
 4. **`_system/Gouvernance/referentiel-types-statuts.md`** — every note type and its status cycle
 
@@ -31,11 +32,12 @@ Then, depending on the task:
 - **Anything touching a project** → `_system/Instructions/raw-refined-context.md` (pipeline behaviour)
 - **Project context** → that project's `02_Context/`
 
-> ⚠️ **Known ambiguity:** two divergent copies of `vault-structure.md` exist —
-> one at the vault root, one in `_system/Gouvernance/`. `agent.md` links
-> `[[vault-structure]]`, which resolves ambiguously. The root copy is more
-> recent (2026-08-31) and more detailed; the Gouvernance copy is the one
-> `CLAUDE.md` names. Read both if the answer matters, and flag the divergence.
+> ⚠️ **Two copies of `vault-structure.md`.** The **vault-root copy is
+> authoritative** — confirmed by Sébastien on 2026-09-02. The
+> `_system/Gouvernance/` copy is stale (2026-08-06; still lists an `XP_Vault/`
+> that no longer exists). `CLAUDE.md` points at the stale one and `agent.md`
+> links the bare note name, which resolves ambiguously — read the root copy, and
+> flag the `CLAUDE.md` pointer if it still hasn't been fixed.
 
 ---
 
@@ -57,7 +59,7 @@ myVault/
 │   ├── Pro/  → profil-pro.md, sia-partners.md, clients/
 │   └── Perso/ → profil-perso.md, Aspirations.md, Mémoire agent/
 │
-├── 15_Chantiers/                     # cross-cutting ideas not yet projects (type: chantier)
+├── 15_Chantiers/                     # ideas not yet projects (type: chantier), routed from daily notes
 │
 ├── 20_Projects/                      # all piloted work
 │   ├── _Template_projet.md           # canonical project folder structure
@@ -136,8 +138,10 @@ NOM_PROJET/
 | `Business development` | Off-pipeline — `00_Raw/` + `value-proposal/` only |
 | `Interne` | Off-pipeline — `00_Raw/` only |
 
-> **Anomaly still open:** `20_Projects/Pro/00_Raw/Emails/` — a `00_Raw` sitting
-> directly under `Pro/`, outside any project. Do not write there; flag it.
+> **Known workflow error — not a pattern:** `20_Projects/Pro/00_Raw/Emails/`, a
+> `00_Raw` sitting directly under `Pro/`, outside any project. Sébastien
+> confirmed on 2026-09-02 that a faulty workflow created it and that it will be
+> corrected. Never write there, and never imitate it.
 
 Never migrate a project automatically — migration is explicit, project by project.
 

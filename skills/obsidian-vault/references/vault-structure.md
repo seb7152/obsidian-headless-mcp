@@ -6,7 +6,7 @@ updated: 2026-09-02
 # Reference — Vault Structure
 
 Verified against the live vault on **2026-09-02**. Authoritative source in the
-vault: `_system/Gouvernance/vault-structure.md` (see the duplicate warning below).
+vault: **`vault-structure.md` at the vault root** (see the duplicate warning below).
 
 ---
 
@@ -16,7 +16,7 @@ vault: `_system/Gouvernance/vault-structure.md` (see the duplicate warning below
 |---|---|
 | `agent.md` | AI-agent entry point: identity, routing, key files |
 | `CLAUDE.md` | Mandatory reading order at Claude Code startup |
-| `vault-structure.md` | ⚠️ Second, divergent copy of the Gouvernance file |
+| `vault-structure.md` | **The authoritative structure reference** (see warning below) |
 | `Suivi des drafts.base` | Obsidian *Bases* view — drafts to process |
 | `Suivi des workflows.base` | Obsidian *Bases* view — workflows |
 | `00_Inbox/` | Raw capture to triage |
@@ -31,12 +31,14 @@ vault: `_system/Gouvernance/vault-structure.md` (see the duplicate warning below
 | `_system/` | Governance and agent tooling |
 | `.trash/` | Soft deletes — not indexed, purged after `TRASH_RETENTION_DAYS` (30) |
 
-> ⚠️ **Two `vault-structure.md`.** The root copy (updated 2026-08-31) carries the
-> migration state and the `60_Tools` detail; the `_system/Gouvernance/` copy
-> (2026-08-06) is the one `CLAUDE.md` points at, and still mentions an
-> `XP_Vault/` folder that no longer exists. `agent.md` links to the note name
-> alone, which resolves ambiguously between the two. Neither copy lists `15_Chantiers/`
-> or `Excalidraw/`. Flag this rather than silently picking one.
+> ⚠️ **Two `vault-structure.md`.** The **root copy is authoritative** — confirmed
+> by Sébastien on 2026-09-02, and updated the same day to document
+> `15_Chantiers/`. The `_system/Gouvernance/` copy (2026-08-06) is stale: it
+> still mentions an `XP_Vault/` folder that no longer exists, and lists neither
+> `15_Chantiers/` nor `Excalidraw/`. `CLAUDE.md` points at that stale copy and
+> `agent.md` links the bare note name, which resolves ambiguously between the
+> two — read the root copy, and flag the `CLAUDE.md` pointer if it is still
+> unfixed. `Excalidraw/` remains undocumented in both.
 
 ---
 
@@ -66,12 +68,35 @@ project is unclear.
 
 ## 15_Chantiers/
 
-Flat folder of `type: chantier` notes — an idea, a want, a cross-cutting line of
-thought (pro / perso / business) that could become a piloted project but isn't
-one yet. Lives at the vault root, deliberately outside any `20_Projects/`
-container. `active` = actively pursued; `archived` = dropped, or promoted to a
-project (then `related_project` is filled). Routing rules: the
-`daily-note-routing` instruction.
+Added 2026-09-01. Flat folder of `type: chantier` notes — an idea, a want, a
+cross-cutting subject (pro / perso / business) attached to no piloted project,
+or still at the thinking stage. Deliberately outside any `20_Projects/`
+container, and outside the Raw/Refined/Context pipeline.
+
+**How it is fed:** chantiers are routed out of the **dictated daily notes**
+(`00_Inbox/Notes quotidiennes/YYYY-MM-DD.md`) by the `daily-note-routing`
+instruction. That agent splits the day's note into fragments and resolves each
+against the existing referential:
+
+| Fragment resolves to | Action |
+|---|---|
+| An existing chantier (matched on `aliases`) | Append a line to its `## Journal` via `patch_file` |
+| An existing piloted project | Drop the fragment verbatim into that project's `00_Raw/Notes/YYYY-MM-DD.md` (one file per project per day) |
+| A genuinely new idea | Create a `status: draft` chantier stub |
+| Several candidates (ambiguous) | Create nothing — flag it in the trace on the source note |
+| Noise (practical info, secrets, asides) | Ignore, no trace |
+
+The routing agent never extracts (no facts, decisions or `02_Context/` writes —
+that is the 22:00 Daily Refinement's job), never creates a project, and never
+rewrites the dictated text: it only appends a `## Traitement — HH:MM` trace at
+the bottom and sets `processed_at` in the frontmatter.
+
+Stub frontmatter: `type: chantier`, `zone: pro|perso|business`, `status: draft`,
+`aliases`, `related_project`, `summary` (a real one-line description, never
+"candidate — à valider").
+
+**Exit:** `archived` means dropped, or promoted to a piloted project — in which
+case `related_project` links the container that was created.
 
 ## 20_Projects/
 
@@ -129,8 +154,10 @@ Behaviour of each stage: `references/pipeline.md` and
 > on disk both now carry the new folders alongside the old ones. Check with
 > `list_directory` before writing, and prefer the new canon for new content.
 
-> **Open anomaly:** `20_Projects/Pro/00_Raw/Emails/` — a `00_Raw` directly under
-> `Pro/`, outside any project. Don't write there; flag it.
+> **Known workflow error — not a pattern:** `20_Projects/Pro/00_Raw/Emails/`, a
+> `00_Raw` directly under `Pro/`, outside any project. Sébastien confirmed on
+> 2026-09-02 that a faulty workflow created it and that it will be corrected.
+> Never write there, and never imitate it.
 
 Never migrate a project on your own initiative.
 

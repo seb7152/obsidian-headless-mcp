@@ -19,13 +19,14 @@ What each governance file does, and when to open it.
 | File | Why |
 |---|---|
 | `agent.md` | Entry point: identity, quick-start routing, key-file table |
-| `_system/Gouvernance/vault-structure.md` | Full tree and role of every folder |
+| `vault-structure.md` (vault root) | Full tree and role of every folder — **the authoritative copy** |
 | `_system/Gouvernance/agent-rules.md` | Permissions, prohibitions, creation checklist. **Never modify** |
 | `_system/Gouvernance/referentiel-types-statuts.md` | Every note type, its status cycle, its location |
 
-> ⚠️ A second, divergent `vault-structure.md` sits at the vault root (more
-> recent, more detailed). `agent.md` links to the note name alone, which
-> resolves ambiguously. Read both when the answer matters; flag the divergence.
+> ⚠️ There are two `vault-structure.md`. The **root** copy is authoritative
+> (confirmed by Sébastien, 2026-09-02); the `_system/Gouvernance/` copy is
+> stale. `CLAUDE.md` names the stale one and `agent.md` links the bare note
+> name, which resolves ambiguously — read the root copy, and flag the pointer.
 
 ## Read on demand
 

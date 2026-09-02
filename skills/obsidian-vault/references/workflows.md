@@ -43,6 +43,10 @@ Is the zone/project obvious?
                     user context?                   → 10_Context/<Zone>/
 ```
 
+Dictated daily notes are not triaged by hand: the `daily-note-routing`
+instruction fans each fragment out to an existing chantier, a project's
+`00_Raw/Notes/`, or a new chantier stub — see `references/vault-structure.md`.
+
 Before creating anything: search for an existing note (`search_vault` fuzzy +
 `query_vault`), pick a governed type, open its instruction in
 `_system/Instructions/`, and fill the frontmatter it prescribes.
