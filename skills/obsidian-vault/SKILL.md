@@ -1,217 +1,104 @@
 ---
 name: obsidian-vault
-description: Work with Sébastien's Obsidian vault (myVault) through the obsidian MCP server. Trigger on any mention of Obsidian, the vault, a note, a project folder (20_Projects, 00_Inbox, 10_Context, 15_Chantiers, 30_Knowledge, 60_Tools), the Raw/Refined/Context pipeline, project context retrieval, or the vault REST API. Covers the current vault structure, the governance files to read first (agent.md, agent-rules, referentiel-types-statuts), the full MCP tool catalogue (read/write/patch, frontmatter, folders, SQL index, comments, webhooks), note types and status cycles, YAML frontmatter conventions, and the REST API.
+description: Navigate Sébastien's Obsidian vault (myVault) through the obsidian MCP server. Trigger on any mention of Obsidian, the vault, a note, a project folder (20_Projects, 00_Inbox, 10_Context, 15_Chantiers, 30_Knowledge, 60_Tools), the Raw/Refined/Context pipeline, project context retrieval, or the vault REST API. This skill is a router, not a rulebook - it says which reference file in the vault answers which question (structure, note types and statuses, agent permissions, per-type writing instructions), and documents the MCP tool catalogue and REST API, which the vault itself does not cover.
 created: 2026-04-27
 updated: 2026-09-02
 ---
 
 # Obsidian Vault Skill
 
-Working guide for **myVault** — Sébastien's Obsidian vault, hosted headless and
-exposed through the `obsidian` **MCP server** (primary) and a **REST API**
-(automations). Everything is markdown + YAML frontmatter.
+Router for **myVault** — Sébastien's Obsidian vault, served headless through the
+`obsidian` **MCP server** (primary) and a **REST API** (automations).
 
-> Structure and governance below reflect the vault as of **2026-09-02**. The
-> vault is the source of truth: when this file and the vault disagree, trust
-> `vault-structure.md` **at the vault root** and say so.
+**This skill does not restate the vault's governance.** The vault documents its
+own structure, note types, statuses and agent rules, and those files change
+faster than this skill. The skill's job is to get you to the right file fast,
+and to cover the one thing the vault doesn't document: the MCP and REST tooling.
 
----
-
-## 1. Startup — read these first
-
-Order imposed by `CLAUDE.md` at the vault root:
-
-1. **`agent.md`** — entry point: identity, routing, key files
-2. **`vault-structure.md` at the vault root** — full tree. (`CLAUDE.md` names
-   the `_system/Gouvernance/` copy instead; that one is stale — see below.)
-3. **`_system/Gouvernance/agent-rules.md`** — permissions, prohibitions
-4. **`_system/Gouvernance/referentiel-types-statuts.md`** — every note type and its status cycle
-
-Then, depending on the task:
-- **Writing / methodology task** → `_system/Instructions/_index.md`, pick the instruction for the note type
-- **Anything touching a project** → `_system/Instructions/raw-refined-context.md` (pipeline behaviour)
-- **Project context** → that project's `02_Context/`
-
-> ⚠️ **Two copies of `vault-structure.md`.** The **vault-root copy is
-> authoritative** — confirmed by Sébastien on 2026-09-02. The
-> `_system/Gouvernance/` copy is stale (2026-08-06; still lists an `XP_Vault/`
-> that no longer exists). `CLAUDE.md` points at the stale one and `agent.md`
-> links the bare note name, which resolves ambiguously — read the root copy, and
-> flag the `CLAUDE.md` pointer if it still hasn't been fixed.
+> When this skill and the vault disagree, **the vault wins** — say so and follow
+> the vault.
 
 ---
 
-## 2. Vault structure (2026-09-02)
+## 1. Startup — read these, in this order
 
-```
-myVault/
-├── agent.md                          # AI agent entry point
-├── CLAUDE.md                         # mandatory reading order
-├── vault-structure.md                # ⚠ duplicate of _system/Gouvernance/vault-structure.md
-├── Suivi des drafts.base             # Obsidian Bases (.base views)
-├── Suivi des workflows.base
-│
-├── 00_Inbox/                         # raw capture, to triage
-│   ├── Granola/                      # imported meeting notes
-│   └── Notes quotidiennes/           # daily journal
-│
-├── 10_Context/                       # who the user is
-│   ├── Pro/  → profil-pro.md, sia-partners.md, clients/
-│   └── Perso/ → profil-perso.md, Aspirations.md, Mémoire agent/
-│
-├── 15_Chantiers/                     # ideas not yet projects (type: chantier), routed from daily notes
-│
-├── 20_Projects/                      # all piloted work
-│   ├── _Template_projet.md           # canonical project folder structure
-│   ├── Pro/                          # client & internal projects
-│   └── Perso/                        # Coding projects/, Finance knowledge/
-│
-├── 30_Knowledge/                     # long-term memory — fed ONLY by promotion from a 02_Context/
-│   ├── ai/  ai-coding/  Obsidian/  real-estate/
-│   └── permanent-notes/staging/      # only agent-writable entry point for the Zettelkasten
-│
-├── 40_Resources/                     # external references
-│   └── Frameworks/ ia-research/ skills/ Tools/ Web/
-│
-├── 50_Archives/                      # archived notes
-├── 60_Tools/                         # direct-write sheets, NO Raw/Refined pipeline
-│   └── Activities/ Checklists/ Gift-assistant/
-├── Excalidraw/                       # drawings
-│
-├── _system/                          # governance & agent tooling
-│   ├── Gouvernance/                  # agent-rules.md, vault-structure.md, referentiel-types-statuts.md
-│   ├── Instructions/                 # _index.md, raw-refined-context.md + Cadeaux/ Checklist/ Coding/
-│   │                                 #   Context/ Finance/ Notes atomiques/ Podcast/ Pro/ Raw/ Refinement/
-│   ├── API.md                        # REST + MCP reference
-│   ├── Classes/ claude-plugins/ copilot/ skills/ Templates/
-│   └── *.base                        # Hygiène — drafts, Last-modified-items
-│
-└── .trash/                           # soft deletes — NOT indexed, purged after 30 days
-```
+Imposed by `CLAUDE.md` at the vault root:
 
-**What changed vs. the old skill:** `10_context/perso` → `10_Context/Perso/`;
-`_system/agent_rules.md` + `_system/MEMORY.md` **no longer exist** (replaced by
-`_system/Gouvernance/agent-rules.md` and `referentiel-types-statuts.md`);
-`20_Projects/` is now split `Pro/` vs `Perso/`; `15_Chantiers/`, `60_Tools/`,
-`50_Archives/`, `Excalidraw/` are new; per-project folders follow the
-Raw/Refined/Context canon instead of `Réunions/`, `Decisions/`, `Coding-Notes/`.
-
-### 2.1 Canonical project structure
-
-Every project under `20_Projects/[Pro|Perso]/[Projet]/` should follow
-`20_Projects/_Template_projet.md` (2026-08-05 refit, 3 folders):
-
-```
-NOM_PROJET/
-├── 00_Raw/                    ← SOURCE OF TRUTH, never rewritten
-│   ├── Transcripts/           ← every audio transcription (meetings + podcasts)
-│   │   └── Granola/
-│   ├── Emails/                ← archived emails (IMAP Checker)
-│   ├── Documents/             ← deliverables, external docs
-│   └── Notes/                 ← quick capture
-├── 01_Refined/
-│   ├── 01_Meetings/           ← meeting-summary
-│   ├── 02_Podcasts/           ← podcast-summary
-│   └── 0N_Extraction/         ← structured extraction notes
-├── 02_Context/                ← distilled, validated referential — single source of truth
-│   ├── 00_Meta/               ← project sheet (type: project)
-│   ├── 01_Stakeholders/  02_Topics/  03_Décisions/  …
-│   └── log/                   ← append-only journal, one file per month (YYYY-MM.md)
-└── _index.md                  ← cockpit — Dataview/SQL only, never hand-edited
-```
-
-**Numbering is load-bearing.** n8n workflows target paths by prefix
-(`*/02_Context/%`); shifting a prefix makes the project invisible to them.
-
-### 2.2 Migration state (verified 2026-09-02)
-
-| Project (`20_Projects/Pro/`) | State |
-|---|---|
-| `Agents IA` | New canon (pilot, 2026-08-06) + a `reflexions/` folder |
-| `ENGIE-Lease-Management` | New canon |
-| `ENGIE-Parking-Room-Booking` | New canon |
-| `Praemia REIM - Application mobile` | New canon |
-| `MEN` | **Mid-migration** — new (`00_Raw/01_Refined/02_Context`) *and* legacy (`01_pilotage/02_Refinement/04_Contexte`) coexist |
-| `SANOFI - Smartbuilding` | **Mid-migration** — new folders *and* legacy `01_pilotage/02_Contexte/03_knowledge` |
-| `The-Link` | Historical layout: `Contexte/ Décisions/ Livrables/ Planning/ Réflexions/ Réunions/` |
-| `Business - Recherche` | Off-pipeline (`Artisans/ Freelance/ Garages/`) |
-| `Business development` | Off-pipeline — `00_Raw/` + `value-proposal/` only |
-| `Interne` | Off-pipeline — `00_Raw/` only |
-
-> **Known workflow error — not a pattern:** `20_Projects/Pro/00_Raw/Emails/`, a
-> `00_Raw` sitting directly under `Pro/`, outside any project. Sébastien
-> confirmed on 2026-09-02 that a faulty workflow created it and that it will be
-> corrected. Never write there, and never imitate it.
-
-Never migrate a project automatically — migration is explicit, project by project.
-
----
-
-## 3. Note types & status cycles
-
-Reference: `_system/Gouvernance/referentiel-types-statuts.md`. Generic cycle
-`draft → active → archived`, with exceptions. Downstream n8n/Dataview queries
-filter on `status: active`.
-
-| Where | Types | Status cycle |
+| # | File | Answers |
 |---|---|---|
-| `00_Raw/` | `document` (+ `doc_type`), `email`, `transcript` | `draft → validated \| skipped` |
-| `01_Refined/` | `meeting-summary`, `podcast-summary`, `extraction` | `draft → validated` (`skipped` for summaries) |
-| `02_Context/` | `stakeholder`, `organization`, `topic`, `decision`, `vendor`, `project`, `use-case`, `process`, `insight`, `synthesis`, `knowledge-note` | `draft → active → archived` |
-| `15_Chantiers/` | `chantier` | `draft → active → archived` (archived = dropped or promoted, set `related_project`) |
-| `_system/Instructions/` | `instruction` | `draft → active` |
-| `30_Knowledge/` | `pattern`, `debug-log` | `draft → active` / `open → resolved` |
-| anywhere | `index` (`active`), `log` (`active`), `reflection` (`open → resolved`), `session-log` (`active → partial → completed`) | — |
+| 1 | `agent.md` (root) | Who the user is, how to route the session, which files matter |
+| 2 | `_system/Gouvernance/vault-structure.md` | The whole tree, the role of every folder, the canonical project layout, migration state |
+| 3 | `_system/Gouvernance/agent-rules.md` | What you may and may not do. **Never modify this file** |
+| 4 | `_system/Gouvernance/referentiel-types-statuts.md` | Every governed note type, its status cycle, where it lives |
 
-`skipped` = a deliberate decision **not** to run a source through extraction.
-Distinct from `validated` + `processed_at` (extraction actually done). Never use
-it to hide an untreated backlog.
+Then, by task:
 
-**Organization linking:** `organization` (single short-name wikilink) on a
-`stakeholder`; `organizations` (list) on `extraction` and `use-case`. Targets
-always live in the current container's `02_Context/`.
-
----
-
-## 4. Hard rules (from `agent-rules.md`)
-
-🔴 **Never**
-- Mix pro and perso in one note; never touch `10_Context/Perso/` during a pro session.
-- Modify `_system/Gouvernance/agent-rules.md`.
-- Create or hand-edit an `_index.md` or an existing Dataview query.
-- Delete or archive a note without proposing it first.
-- Rewrite anything in `00_Raw/` — whatever the content.
-- Feed `30_Knowledge/` directly from work in progress (promotion from a `02_Context/` only).
-- Export raw sensitive data, or mix it with examples in a note.
-
-🟢 **Always**
-- Search before creating.
-- When unsure of the zone, write to `00_Inbox/`.
-- Set `updated: YYYY-MM-DD` on every create/modify done through MCP (the
-  *Update Time on Edit* plugin only covers the Obsidian UI).
-- No `/ \ : * ? " < > |` in a note title — it becomes a filename. Rephrase
-  (`€/m²` → `€ par m²`, `avant/après` → `avant-après`), never drop the info.
-- **Wikilinks: filename only.** A double-bracket link contains the bare
-  filename — never a folder path, never a `.md` extension. This includes
-  (especially) frontmatter fields like `source`, `stakeholders`, `topics`,
-  `decisions`. Obsidian resolves by shortest path. Only exception, for a
-  *structural* collision (e.g. dated `YYYY-MM-DD.md` notes in several folders):
-  the full path **followed by a pipe alias** (`dossier/Nom` then `|Nom`), never
-  a bare full path.
-- An entity unknown to `02_Context/` gets an immediate `status: draft` stub —
-  never leave a broken link.
-- An extraction note carries real wikilinks in YAML, never JSON.
-
-**Creation checklist:** identify zone → search existing → pick a governed type
-and its location → fill frontmatter per its instruction in `_system/Instructions/`
-→ link with wikilinks → leave indexes alone → check type/zone coherence.
+| Task | Open |
+|---|---|
+| Writing a note of any governed type | `_system/Instructions/<type>.md` — see §3 |
+| Anything touching a project's pipeline | `_system/Instructions/raw-refined-context.md` |
+| Creating a project | `20_Projects/_Template_projet.md` |
+| Understanding a project's domain | that project's `02_Context/` — query it first, see §4 |
+| Calling the REST API | `_system/API.md` |
 
 ---
 
-## 5. MCP tools
+## 2. Reference map — which file answers what
 
-The `obsidian` MCP server is the primary access path. Full catalogue and
-semantics: `references/mcp-tools.md`; endpoint-level detail: `_system/API.md`.
+Full index with paths: `references/reference-map.md`.
+
+| Question | Reference |
+|---|---|
+| Where does this note go? What is this folder for? | `_system/Gouvernance/vault-structure.md` |
+| What type should this note be? Which status next? | `_system/Gouvernance/referentiel-types-statuts.md` |
+| Am I allowed to write here? Delete this? Rename this? | `_system/Gouvernance/agent-rules.md` |
+| What exact fields does a `stakeholder` / `decision` / … need? | `_system/Instructions/Context/<type>.md` |
+| How does extraction / validation / promotion work? | `_system/Instructions/raw-refined-context.md` |
+| How do dictated daily notes become chantiers? | `_system/Instructions/Refinement/daily-note-routing.md` |
+| What folders does a new project get? | `20_Projects/_Template_projet.md` |
+| Which MCP tool should I call? | `references/mcp-tools.md` |
+| Which REST endpoint? | `references/rest-api.md`, then `_system/API.md` |
+
+`_system/Gouvernance/` holds the three referentials and nothing else. Everything
+about *how to write* a given note type lives in `_system/Instructions/`, one
+file per type.
+
+---
+
+## 3. Finding the right instruction
+
+`_system/Instructions/_index.md` is the Dataview entry point. The tree, as of
+2026-09-02:
+
+| Folder | Instructions |
+|---|---|
+| `Raw/` | `document`, `transcript`, `email-inbox-archiving` |
+| `Refinement/` | `extraction`, `meeting-summary`, `daily-note-routing`, `daily-refinement`, `weekly-refinement`, `weekly-summary`, `weekly-synthesis-by-theme`, `weekly-synthesis-evolution` |
+| `Context/` | `stakeholder`, `organization`, `topic`, `decision`, `decision-capitalisation`, `vendor`, `project`, `use-case`, `process`, `insight`, `synthesis`, `knowledge-note`, `context`, `reflection`, `cockpit`, `wiki-lint` |
+| `Notes atomiques/` | `permanent-note`, `atomic-note-formatting`, `Atomic-note-deconstruction`, `MOC-model-detection`, `quickstart-zettelkasten`, `gemini-permanent-note-extraction` |
+| `Coding/` | `session-log`, `coding-session-log`, `debug-log`, `pattern` |
+| `Pro/` | `email-writing`, `email-minutes` |
+| `Cadeaux/`, `Checklist/`, `Finance/`, `Podcast/` | domain-specific |
+
+Don't trust that list over the vault — re-derive it whenever it matters:
+
+```sql
+SELECT path, json_extract(frontmatter,'$.summary') AS summary
+FROM files
+WHERE path LIKE '_system/Instructions/%'
+  AND json_extract(frontmatter,'$.type') = 'instruction'
+ORDER BY path;
+```
+
+**No instruction exists for a type → do not create that type without human
+validation** (rule from `agent-rules.md`).
+
+---
+
+## 4. MCP tools
+
+This is the part the vault does not document. Full catalogue, signatures and
+gotchas: **`references/mcp-tools.md`**.
 
 **Navigate & read**
 ```
@@ -219,136 +106,85 @@ list_directory(dir_path="")                    # "" = vault root
 get_projects()                                 # 20_Projects/Pro/ only
 search_vault(query, fuzzy=True, since, before)
 query_vault(sql)                               # SELECT over the SQLite index
-read_file(file_path, resolve_links=True)       # returns content + resolved wikilinks
+read_file(file_path, resolve_links=True)       # content + resolved wikilinks
 ```
 
 **Write** — pick the narrowest tool that does the job:
 
 | Need | Tool |
 |---|---|
-| Change a few frontmatter fields | `update_frontmatter` (body untouched) |
+| A few frontmatter fields | `update_frontmatter` (body untouched) |
 | Same patch on many files | `bulk_update_frontmatter` (≤ 100) |
-| Change a precise passage | `patch_file(old_text, new_text)` — errors if not found |
+| A precise passage | `patch_file(old_text, new_text)` — errors if not found |
 | Add at the end | `append_to_file` |
 | New file / full rewrite | `write_file` |
 | Move / rename | `move_file`, `move_folders` |
 | Delete | `delete_file` / `delete_folders` (soft by default → `.trash/`) |
 | Scaffold a project tree | `create_folders([...])` in one call |
 
-`write_file` / `append_to_file` / `patch_file` return a warning listing any
-**broken wikilinks** in what you just wrote, plus fuzzy suggestions, and
-an `obsidian://open` deep link. Read that warning — it is the cheapest way to
-catch a stub you owe `02_Context/`.
+Never `write_file` a whole note to change one field.
 
-**Other**: `run_index(file_path, section)` (execute a cockpit's SQL blocks),
-`extract_tasks`, comment threads (`extract_comments`, `create_comment`,
-`reply_to_comment`, `set_comment_status`, `delete_comment`), `sync_vault`,
-`get_sync_status`, `list_webhooks` (read-only — webhooks are created via REST).
+**Also available**: `run_index` (execute a cockpit's SQL blocks), `extract_tasks`,
+comment threads (`extract_comments`, `create_comment`, `reply_to_comment`,
+`set_comment_status`, `delete_comment`), `sync_vault`, `get_sync_status`,
+`list_webhooks` (read-only — webhooks are created via REST).
 
-### Typical navigation
-```
-1. get_projects()                                → what exists under Pro/
-2. list_directory("20_Projects/Pro/<Projet>")    → which canon this project is on
-3. list_directory(".../02_Context/01_Stakeholders")
-4. search_vault("lease management", fuzzy=True)  → find across the vault
-5. read_file("<path>.md")                        → content + wikilink resolution
-```
+### Map a project before reading it
 
-### Useful SQL
 ```sql
--- everything still in draft in a project
-SELECT path, title FROM files
-WHERE path LIKE '20_Projects/Pro/Agents IA/%'
-  AND json_extract(frontmatter, '$.status') = 'draft';
-
--- unprocessed raw sources
-SELECT path FROM files
-WHERE path LIKE '%/00_Raw/%'
-  AND json_extract(frontmatter, '$.status') = 'draft';
-
--- open tasks due within 7 days
-SELECT file_path, text, due FROM tasks
-WHERE completed = 0 AND due <= date('now', '+7 days') ORDER BY due;
+SELECT path, json_extract(frontmatter,'$.type')    AS type,
+             json_extract(frontmatter,'$.summary') AS summary
+FROM files
+WHERE path LIKE '20_Projects/<Zone>/<Projet>/02_Context/%'
+  AND json_extract(frontmatter,'$.status') != 'archived'
+ORDER BY type, path;
 ```
-Tables: `files(path, title, created, modified, tags, frontmatter)` and
-`tasks(file_path, text, completed, due)`. `SELECT` only. `.trash/` and dotfiles
-are not indexed.
+
+This is the sanctioned substitute for a static index — see
+`raw-refined-context.md`, "Carte sémantique". Tables: `files(path, title,
+created, modified, tags, frontmatter)` and `tasks(file_path, text, completed,
+due)`. `SELECT` only. `.trash/` and dotfiles are not indexed.
 
 ---
 
-## 6. REST API (automations, n8n)
+## 5. REST API
+
+For automations (n8n, scripts) and webhooks — inside an agent session prefer
+MCP. Summary in `references/rest-api.md`, full reference in **`_system/API.md`**.
 
 Base `https://obsidian-api.<DOMAIN>`, `Authorization: Bearer <API_TOKEN>` on
-everything except `GET /health`. Full reference: **`_system/API.md`** in the vault.
-
-| Need | Endpoint |
-|---|---|
-| Filter by frontmatter | `GET /api/files?type=…&status=…&path=…&since=…` |
-| Read / write / delete | `GET \| POST \| DELETE /api/file/{path}` |
-| Frontmatter only | `PATCH /api/file/{path}` |
-| Body only | `PATCH /api/file/{path}/body` |
-| Surgical patch | `PATCH /api/file/{path}/patch` |
-| Batch read / patch / move | `POST \| PATCH /api/files/batch`, `POST /api/files/move` |
-| Folders | `POST \| DELETE /api/folders`, `POST /api/folders/move` |
-| SQL | `POST /api/query` |
-| Broken links | `GET /api/file/{path}/links`, `POST /api/links/check` |
-| Index & watcher health | `GET /api/sync/status` |
-| Webhooks | `/api/webhooks…` — **REST only**, MCP is read-only |
-
-Webhooks fire on `add`/`change`/`unlink` of `.md` files, filterable by `folder`
-(wildcards per segment) and by `frontmatter` / `frontmatter_not` — the latter
-breaks write loops (e.g. skip changes whose `last_write_origin` is `todoist`).
+everything except `GET /health`. Webhooks are REST-only; MCP can only list them.
 
 ---
 
-## 7. Frontmatter
+## 6. Tool-level reflexes
 
-```yaml
----
-title: "Titre lisible"          # display title
-type: stakeholder               # governed type — see §3
-zone: pro | perso | technique   # must match the file's location
-project: "Agents IA"            # container, null outside a project
-status: draft                   # cycle imposed by the type
-created: '2026-09-02'
-updated: '2026-09-02'           # agent MUST set this on every write via MCP
-tags: [agent-rules, permissions]
-agent: human | claude-code | claude-ai
-summary: >-
-  1–3 lines, plain text.
----
-```
+Not governance — consequences of how the tools behave. The authoritative rule is
+always in the file named alongside.
 
-The exact field set is imposed by the type's instruction in
-`_system/Instructions/`. **No instruction for a type → no creation without human
-validation.** Details and per-type examples: `references/file-format.md`.
+- **Wikilinks: filename only**, no folder path, no `.md`. Write tools return a
+  warning listing broken links in what you just wrote — read it. Exceptions and
+  the pipe-alias case: `agent-rules.md`.
+- **Set `updated: YYYY-MM-DD` on every MCP write.** The *Update Time on Edit*
+  plugin only fires in the Obsidian UI.
+- **Forbidden in a title**, because it becomes a filename: `/ \ : * ? " < > |`.
+- **`_index.md` is generated** — read it or `run_index` it, never write it.
+- **`00_Raw/` content is immutable** — frontmatter only (`status`,
+  `processed_at`). See `raw-refined-context.md`.
+- **`get_projects()` covers `Pro/` only** — use `list_directory` for `Perso/`.
+- **`patch_file` fails loudly** when `old_text` is absent. That is the point;
+  never fall back to `write_file` to force the edit through.
+- **A file that never appears in `query_vault`** means the watcher is likely
+  dead — check `get_sync_status()`.
 
 ---
 
-## 8. Reference files
-
-| File | When |
-|---|---|
-| `references/vault-structure.md` | Full tree, per-folder role, project canon, migration state |
-| `references/mcp-tools.md` | Complete MCP tool catalogue with signatures and gotchas |
-| `references/pipeline.md` | Raw → Refined → Context: what happens at each stage |
-| `references/file-format.md` | Frontmatter spec, types, status cycles, zones |
-| `references/key-files.md` | What each governance file does and when to read it |
-| `references/rest-api.md` | REST endpoints summary (full doc: `_system/API.md`) |
-
-In the vault: `agent.md`, `_system/Gouvernance/*`, `_system/Instructions/_index.md`,
-`_system/Instructions/raw-refined-context.md`, `20_Projects/_Template_projet.md`,
-`_system/API.md`.
-
----
-
-## 9. Reflexes
+## 7. Reflexes on the work itself
 
 - **Project not named in the request?** Ask. Don't guess the container.
-- **Can't find the context?** Say so, and propose fixing the index file rather
-  than inventing a location.
-- **Writing a wikilink?** Filename only, and check the broken-link warning.
-- **Creating in `02_Context/`?** Stub every unknown entity it points at.
-- **Touching `00_Raw/`?** Only frontmatter (`status`, `processed_at`) — never the content.
-- **`60_Tools/` and `30_Knowledge/`** are outside the pipeline. `60_Tools/` is
-  written directly; `30_Knowledge/` only receives validated promotions.
+- **Can't find the context?** Say so and propose fixing the index, rather than
+  inventing a location.
+- **Before creating anything:** search for what exists (`search_vault` fuzzy +
+  `query_vault`), then open the type's instruction and follow it.
+- **Zone check:** never mix pro and perso in one note; never open
+  `10_Context/Perso/` during a pro session (`agent-rules.md`).

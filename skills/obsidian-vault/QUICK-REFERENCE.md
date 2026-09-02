@@ -3,102 +3,58 @@ created: 2026-04-11
 updated: 2026-09-02
 ---
 
-# Quick Reference — Obsidian Vault Skill
+# Quick Reference
 
-Cheat sheet. Details in `SKILL.md` and `references/`.
+One screen. Everything here is a pointer — the answers live in the vault.
 
 ---
 
-## 1. Startup
+## Startup
 
 ```
 agent.md
-  → _system/Gouvernance/vault-structure.md      (tree)
-  → _system/Gouvernance/agent-rules.md          (permissions)
-  → _system/Gouvernance/referentiel-types-statuts.md   (types & statuses)
-  → _system/Instructions/_index.md              (if writing/methodology)
-  → _system/Instructions/raw-refined-context.md (if touching a project)
+  → _system/Gouvernance/vault-structure.md          (tree, folder roles, project canon)
+  → _system/Gouvernance/agent-rules.md              (permissions — never modify)
+  → _system/Gouvernance/referentiel-types-statuts.md (types & status cycles)
+  → _system/Instructions/<type>.md                  (before writing that type)
+  → _system/Instructions/raw-refined-context.md     (before touching a project)
 ```
 
-## 2. Where does this note go?
+## Where do I look?
 
-```
-Unclear zone/project?          → 00_Inbox/
-Idea, not yet a project?       → 15_Chantiers/          (type: chantier)
-Piloted project?               → 20_Projects/<Pro|Perso>/<Projet>/
-   raw source                  →   00_Raw/<Transcripts|Emails|Documents|Notes>/
-   summary / one-fact note     →   01_Refined/<01_Meetings|02_Podcasts|0N_Extraction>/
-   validated entity            →   02_Context/<00_Meta|01_Stakeholders|02_Topics|03_Décisions|…>/
-Personal tool sheet?           → 60_Tools/
-User context?                  → 10_Context/<Pro|Perso>/
-Mature, promoted knowledge?    → 30_Knowledge/[thème]/   (human-validated only)
-Zettelkasten draft?            → 30_Knowledge/permanent-notes/staging/
-```
+| Question | File |
+|---|---|
+| Where does this note go? | `Gouvernance/vault-structure.md` |
+| Which type? which status? | `Gouvernance/referentiel-types-statuts.md` |
+| May I write / delete / rename this? | `Gouvernance/agent-rules.md` |
+| What fields does this type need? | `Instructions/<famille>/<type>.md` |
+| How does the pipeline behave? | `Instructions/raw-refined-context.md` |
+| Daily note → chantier? | `Instructions/Refinement/daily-note-routing.md` |
+| New project folders? | `20_Projects/_Template_projet.md` |
+| Project domain context? | `<projet>/02_Context/` (query it, §SQL below) |
+| REST endpoints? | `_system/API.md` |
+| MCP tools? | `references/mcp-tools.md` |
+| Full index of references | `references/reference-map.md` |
 
-## 3. Which write tool?
+## Which write tool?
 
 | Need | Tool |
 |---|---|
 | A few frontmatter fields | `update_frontmatter` |
 | Same fields, many files | `bulk_update_frontmatter` (≤100) |
-| A precise passage | `patch_file` (errors if `old_text` not found) |
+| A precise passage | `patch_file` (errors if `old_text` absent) |
 | Add at the end | `append_to_file` |
 | New file / full rewrite | `write_file` |
 | Move / rename | `move_file`, `move_folders` |
 | Delete | `delete_file` (soft → `.trash/`) |
 | Scaffold a tree | `create_folders([...])` |
 
-Never `write_file` a whole note just to change one field.
+Never `write_file` a whole note to change one field.
 
-## 4. Frontmatter skeleton
-
-```yaml
----
-title: "Titre lisible"
-type: stakeholder                # governed type
-zone: pro | perso | technique    # must match the path
-project: "Agents IA"
-status: draft                    # cycle imposed by the type
-created: '2026-09-02'
-updated: '2026-09-02'            # ALWAYS set on an MCP write
-tags: []
-agent: claude-ai
-summary: >-
-  1–3 lines.
----
-```
-
-## 5. Status cheat sheet
-
-```
-00_Raw      : draft → validated (+ processed_at once ingested) | skipped
-01_Refined  : draft → validated
-02_Context  : draft → active → archived
-15_Chantiers: draft → active → archived   (archived = dropped or promoted)
-debug-log / reflection : open → resolved
-index, log  : active
-```
-
-## 6. Hard nos
-
-| Don't | Do instead |
-|---|---|
-| Rewrite `00_Raw/` content | Frontmatter only (`status`, `processed_at`) |
-| Create/edit an `_index.md` | Read it, or `run_index()` |
-| Modify `agent-rules.md` | Propose the change to Sébastien |
-| Write straight into `30_Knowledge/` | Promote from a `02_Context/`, human-validated |
-| Open `10_Context/Perso/` in a pro session | Stay in the pro zone |
-| Leave a broken wikilink | Create a `draft` stub in `02_Context/` |
-| Stub an ambiguous entity | Leave the extraction `draft`, state the ambiguity |
-| Stub a `decision` | Flag it for manual creation |
-| A wikilink carrying a folder path | Filename only |
-| `/ \ : * ? " < > \|` in a title | Rephrase (`€/m²` → `€ par m²`) |
-| Delete/archive silently | Propose first |
-
-## 7. Useful SQL
+## SQL starters
 
 ```sql
--- project referential map (run before opening sheets)
+-- map a project's referential before opening any sheet
 SELECT path, json_extract(frontmatter,'$.type') AS type,
        json_extract(frontmatter,'$.summary') AS summary
 FROM files WHERE path LIKE '%/02_Context/%'
@@ -109,19 +65,26 @@ SELECT path FROM files WHERE path LIKE '%/00_Raw/%'
   AND json_extract(frontmatter,'$.status') = 'validated'
   AND json_extract(frontmatter,'$.processed_at') IS NULL;
 
+-- the live list of instructions
+SELECT path, json_extract(frontmatter,'$.summary') AS summary FROM files
+WHERE path LIKE '_system/Instructions/%'
+  AND json_extract(frontmatter,'$.type') = 'instruction' ORDER BY path;
+
 -- open tasks due within 7 days
 SELECT file_path, text, due FROM tasks
 WHERE completed = 0 AND due <= date('now','+7 days') ORDER BY due;
 ```
 
-## 8. Where to look
+## Tool-level reflexes
 
-| Question | File |
+| Do | Why |
 |---|---|
-| Full tree, migration state | `references/vault-structure.md` |
-| How the pipeline behaves | `references/pipeline.md` |
-| MCP tool signatures & gotchas | `references/mcp-tools.md` |
-| Frontmatter, types, zones | `references/file-format.md` |
-| Which governance file to read | `references/key-files.md` |
-| REST endpoints | `references/rest-api.md` → `_system/API.md` |
-| Common task recipes | `references/workflows.md` |
+| Wikilink = filename only | Obsidian resolves by shortest path; write tools flag broken links |
+| Set `updated` on every MCP write | The Obsidian plugin only fires in the UI |
+| No `/ \ : * ? " < > \|` in a title | It becomes a filename |
+| Never write `_index.md` | Generated — read it, or `run_index` |
+| `00_Raw/` body is immutable | Frontmatter only (`status`, `processed_at`) |
+| `get_projects()` = `Pro/` only | Use `list_directory` for `Perso/` |
+
+Everything else — permissions, zones, statuses, formats — is in the vault. Open
+the file rather than guessing.
