@@ -370,3 +370,62 @@ test('integration: getStatus reports chunk and embedding counts', () => {
   assert.equal(status.semantic_ready, false);
   assert.equal(status.pending, status.chunks);
 });
+
+test('embed worker: retries a rate-limited (429) batch instead of abandoning the backfill', async () => {
+  // Reproduces what actually happened against Jina's free tier in production:
+  // a batch came back 429, and the worker used to give up on the whole run
+  // rather than back off and retry — stalling the backfill until someone
+  // manually restarted the service or hit /api/search/reindex.
+  buildTestIndex();
+
+  const origInit = embeddingsModule.init;
+  const origEmbed = embeddingsModule.embed;
+  let calls = 0;
+  embeddingsModule.init = async () => {};
+  embeddingsModule.embed = async (texts) => {
+    calls++;
+    if (calls < 3) {
+      const err = new Error('rate limited');
+      err.status = 429;
+      err.retryAfterMs = 1; // keep the test fast regardless of the real default backoff
+      throw err;
+    }
+    return texts.map(() => new Float32Array(4).fill(0.1));
+  };
+
+  try {
+    await searchIndex.runEmbedWorker();
+  } finally {
+    embeddingsModule.init = origInit;
+    embeddingsModule.embed = origEmbed;
+  }
+
+  assert.ok(calls >= 3, `expected the worker to retry past the two 429s, got ${calls} call(s)`);
+  const status = searchIndex.getStatus();
+  assert.equal(status.embedded, status.chunks, 'all chunks should be embedded once the retries succeed');
+});
+
+test('embed worker: a non-retryable error (e.g. a bad key) gives up immediately', async () => {
+  buildTestIndex();
+
+  const origInit = embeddingsModule.init;
+  const origEmbed = embeddingsModule.embed;
+  let calls = 0;
+  embeddingsModule.init = async () => {};
+  embeddingsModule.embed = async () => {
+    calls++;
+    const err = new Error('unauthorized');
+    err.status = 401;
+    throw err;
+  };
+
+  try {
+    await searchIndex.runEmbedWorker();
+  } finally {
+    embeddingsModule.init = origInit;
+    embeddingsModule.embed = origEmbed;
+  }
+
+  assert.equal(calls, 1, 'a 401 should not be retried at all');
+  assert.equal(searchIndex.getStatus().embedded, 0);
+});

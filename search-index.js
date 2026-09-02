@@ -29,6 +29,17 @@ const MIN_CHARS = Number(process.env.SEARCH_CHUNK_MIN_CHARS || 200);
 const OVERLAP_CHARS = Number(process.env.SEARCH_CHUNK_OVERLAP_CHARS || 300);
 const EMBED_WORKER_BATCH = Number(process.env.EMBED_WORKER_BATCH || 32);
 const RRF_K = Number(process.env.SEARCH_RRF_K || 60);
+// A rate-limited embedding API (a real-world default: Jina's free tier is
+// 100k tokens/min, and a handful of large chunk batches fired back-to-back
+// blows through that) is a transient condition, not a reason to abandon the
+// whole backfill until someone notices and pokes /api/search/reindex.
+const EMBED_RETRY_MAX_ATTEMPTS = Number(process.env.EMBED_RETRY_MAX_ATTEMPTS || 5);
+const EMBED_RETRY_BASE_MS = Number(process.env.EMBED_RETRY_BASE_MS || 5000);
+const EMBED_RETRY_MAX_MS = Number(process.env.EMBED_RETRY_MAX_MS || 60000);
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 let db = null;
 let stmt = null;
@@ -306,15 +317,25 @@ async function runEmbedWorker() {
       if (!batch.length) break;
 
       const texts = batch.map(c => [c.title, c.heading, c.content].filter(Boolean).join('\n'));
-      let vectors;
-      try {
-        vectors = await embeddings.embed(texts, 'passage');
-      } catch (err) {
-        embedState.failed += batch.length;
-        embedState.last_error = err.message;
-        console.error(`[search] embedding batch failed: ${err.message}`);
-        break; // provider is down; retry on the next schedule rather than spin
+      let vectors = null;
+      for (let attempt = 1; attempt <= EMBED_RETRY_MAX_ATTEMPTS; attempt++) {
+        try {
+          vectors = await embeddings.embed(texts, 'passage');
+          break;
+        } catch (err) {
+          const retryable = err.status === 429 || (err.status >= 500 && err.status < 600);
+          if (!retryable || attempt === EMBED_RETRY_MAX_ATTEMPTS) {
+            embedState.failed += batch.length;
+            embedState.last_error = err.message;
+            console.error(`[search] embedding batch failed${retryable ? ' (out of retries)' : ''}: ${err.message}`);
+            break;
+          }
+          const delayMs = Math.min(err.retryAfterMs || EMBED_RETRY_BASE_MS * attempt, EMBED_RETRY_MAX_MS);
+          console.error(`[search] embedding batch rate-limited, retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt}/${EMBED_RETRY_MAX_ATTEMPTS}): ${err.message}`);
+          await sleep(delayMs);
+        }
       }
+      if (!vectors) break; // gave up on this batch; the next schedule (or a manual reindex) resumes here
 
       const write = db.transaction(() => {
         vectors.forEach((vec, i) => {
