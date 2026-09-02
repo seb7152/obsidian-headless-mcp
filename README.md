@@ -848,8 +848,10 @@ A reranker outage degrades to the fused hybrid order and reports itself in
 | `SEARCH_CHUNK_OVERLAP_CHARS` | `300` | Overlap carried across a split |
 | `SEARCH_CANDIDATE_LIMIT` | `40` | Chunks kept after fusion (and sent to the reranker) |
 | `SEARCH_RRF_K` | `60` | RRF constant; lower favours top ranks more sharply |
-| `EMBED_BATCH_SIZE` | `8` local / `64` remote | Chunks per embedding call |
+| `EMBED_BATCH_SIZE` | `8` local / `64` remote | Chunks per embedding call — lower this if a remote provider's per-minute token limit gets tripped often |
 | `EMBED_WORKER_BATCH` | `32` | Chunks pulled from the DB per worker pass |
+| `EMBED_RETRY_MAX_ATTEMPTS` | `5` | Retries for a single batch on 429/5xx before giving up until the next scheduled pass |
+| `EMBED_RETRY_BASE_MS` / `EMBED_RETRY_MAX_MS` | `5000` / `60000` | Backoff between retries (a provider's own `Retry-After` header wins when present) |
 
 ## Files Reference
 
