@@ -116,7 +116,13 @@ async function postJson(url, apiKey, body) {
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`${url} → HTTP ${res.status} ${text.slice(0, 200)}`);
+    const err = new Error(`${url} → HTTP ${res.status} ${text.slice(0, 200)}`);
+    // Lets a caller (the embed worker) tell "try again shortly" (429/5xx) apart
+    // from "this will never work" (401/400) without re-parsing the message.
+    err.status = res.status;
+    const retryAfter = Number(res.headers.get('retry-after'));
+    if (Number.isFinite(retryAfter)) err.retryAfterMs = retryAfter * 1000;
+    throw err;
   }
   return res.json();
 }
