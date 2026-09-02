@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const webhooks = require('./webhooks');
+const searchIndex = require('./search-index');
 
 const VAULT_PATH = process.env.VAULT_PATH || '/vault';
 const SQLITE_PATH = process.env.SQLITE_PATH || '/data/vault-index.db';
@@ -32,6 +33,10 @@ db.exec(`
     due         TEXT
   );
 `);
+
+// Chunk / FTS5 / embedding tables live in the same DB and reference files(path),
+// so they are created once the base schema is in place.
+searchIndex.init(db);
 
 // -- Health tracking --
 // Exposed via getIndexerStatus() for the /api/sync/status endpoint. Watcher
@@ -139,10 +144,13 @@ const stmtDeleteTasks = db.prepare(`DELETE FROM tasks WHERE file_path = ?`);
 const stmtInsertTask  = db.prepare(`INSERT INTO tasks (file_path, text, completed, due) VALUES (?, ?, ?, ?)`);
 const stmtDeleteFile  = db.prepare(`DELETE FROM files WHERE path = ?`);
 
-const doIndex = db.transaction((rel, fm, tags, tasks, title, created, modified) => {
+const doIndex = db.transaction((rel, fm, tags, tasks, title, created, modified, body) => {
   stmtUpsertFile.run(rel, title, created, modified, JSON.stringify(tags), JSON.stringify(fm));
   stmtDeleteTasks.run(rel);
   for (const t of tasks) stmtInsertTask.run(rel, t.text, t.completed, t.due);
+  // Re-chunks the note for BM25/semantic search. Synchronous by design: the
+  // vectors themselves are filled in later by the background embed worker.
+  searchIndex.indexChunks(rel, title, body);
 });
 
 // -- Public API --
@@ -162,7 +170,8 @@ function indexFile(filePath) {
       extractTasks(body),
       fm.title || path.basename(rel, '.md'),
       normalizeDate(fm.created),
-      normalizeDate(fm.modified) || normalizeDate(stat.mtime)
+      normalizeDate(fm.modified) || normalizeDate(stat.mtime),
+      body
     );
     return { rel, frontmatter: fm, body };
   } catch (err) {
@@ -174,7 +183,11 @@ function indexFile(filePath) {
 const stmtGetFrontmatter = db.prepare(`SELECT frontmatter FROM files WHERE path = ?`);
 
 function removeFile(filePath) {
-  stmtDeleteFile.run(path.relative(VAULT_PATH, filePath));
+  const rel = path.relative(VAULT_PATH, filePath);
+  // ON DELETE CASCADE drops the chunks rows but not the external FTS5 rows,
+  // which would otherwise keep matching deleted notes forever.
+  searchIndex.removeChunks(rel);
+  stmtDeleteFile.run(rel);
 }
 
 // Last-known frontmatter from the index (the file is already gone on unlink).
@@ -199,6 +212,7 @@ function reconcile() {
   let added = 0, removed = 0;
   for (const rel of dbRelPaths) {
     if (!vaultRelPaths.has(rel)) {
+      searchIndex.removeChunks(rel);
       stmtDeleteFile.run(rel);
       removed++;
     }
@@ -211,6 +225,20 @@ function reconcile() {
   }
 
   console.log(`[indexer] Reconciled: ${added} file(s) caught up, ${removed} stale entry(ies) removed (${vaultRelPaths.size} in vault)`);
+
+  // Notes indexed before hybrid search existed have no chunks yet; chunk them
+  // now so the first deploy backfills the search index without a manual step.
+  searchIndex.reconcileChunks(rel => {
+    try {
+      const content = fs.readFileSync(path.join(VAULT_PATH, rel), 'utf-8');
+      const { frontmatter: fm, body } = parseFrontmatter(content);
+      return { title: fm.title || path.basename(rel, '.md'), body };
+    } catch {
+      return null;
+    }
+  });
+  searchIndex.scheduleEmbedding();
+
   recordEvent('reconcile', null);
 }
 
@@ -273,4 +301,4 @@ function startWatcher() {
 reconcile();
 startWatcher();
 
-module.exports = { db, indexFile, removeFile, getIndexerStatus, walkMd };
+module.exports = { db, indexFile, removeFile, getIndexerStatus, walkMd, searchIndex };
