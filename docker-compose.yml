@@ -50,7 +50,7 @@ services:
       - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
       - sqlite-data:/data
-    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && for f in obsidian-api.js vault-indexer.js webhooks.js search-index.js embeddings.js rerank.js; do cat /tmp/repo/$$f > /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
+    command: bash -c "set -e; mkdir -p /tmp/app && for f in obsidian-api.js vault-indexer.js webhooks.js search-index.js embeddings.js rerank.js; do curl -fsSL https://raw.githubusercontent.com/seb7152/obsidian-headless-mcp/main/$$f -o /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
     expose:
       - "3000"
     environment:

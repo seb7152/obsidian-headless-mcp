@@ -477,12 +477,28 @@ async function search(query, options = {}) {
   } = options;
 
   const semanticReady = embeddings.isReady() && stmt.countEmbedded.get().c > 0;
-  let mode = options.mode || 'auto';
+  const requestedMode = options.mode || 'auto';
+  // 'auto' implicitly wants semantic too — a caller who never asked for a mode
+  // still deserves to know their results are keyword-only right now, rather
+  // than silently getting worse recall with no signal.
+  const wantsSemantic = requestedMode === 'auto' || requestedMode === 'hybrid' || requestedMode === 'semantic';
+  let mode = requestedMode;
   const warnings = [];
+
   if (mode === 'auto') mode = semanticReady ? 'hybrid' : 'bm25';
-  if ((mode === 'hybrid' || mode === 'semantic') && !semanticReady) {
-    warnings.push('semantic index not ready — answered with BM25 only');
-    mode = 'bm25';
+  if ((mode === 'hybrid' || mode === 'semantic') && !semanticReady) mode = 'bm25';
+
+  if (wantsSemantic && !semanticReady) {
+    // A populated embeddings error (e.g. a missing EMBED_PROVIDER API key) is a
+    // standing misconfiguration, not a transient state — call it out by name
+    // so whoever/whatever is calling this (an LLM via MCP included) can act on
+    // it instead of just seeing quietly worse results.
+    const embedError = embeddings.getStatus().error;
+    warnings.push(
+      embedError
+        ? `semantic search unavailable (${embedError}) — answered with BM25 only`
+        : 'semantic index not ready yet — answered with BM25 only'
+    );
   }
 
   const pool = Math.max(candidateLimit, limit) * 2;

@@ -719,7 +719,7 @@ which half of the index is actually working.
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `chunks: 0` | The chunk backfill never ran | Restart `obsidian-api`; `reconcile()` chunks every note missing from the index on boot |
-| `pending` stuck > 0, `embed_error` set | Embedding provider is down or misconfigured | Fix the provider/key, then `POST /api/search/reindex` |
+| `pending` stuck > 0, `embed_error` set | An API-key provider (`jina`/`openai`/`voyage`) has no key, or `EMBED_PROVIDER=local` hit a transient failure (e.g. the HuggingFace download) | A missing/wrong key needs the env var fixed **and the container recreated** — Docker never re-reads `.env` into a running container. A transient `local`-provider failure just needs `POST /api/search/reindex` |
 | `pending` slowly decreasing | Backfill in progress (10–20 min for ~2k notes on CPU) | Wait; searches answer with BM25 meanwhile |
 | `semantic_ready: false`, no error | `EMBED_PROVIDER=none`, or `@huggingface/transformers` missing from the install | Set a provider and make sure the package is in the container's `npm install` |
 | `warnings: ["rerank: ..."]` | Reranker call failed | Results are still the hybrid ones; check `JINA_API_KEY` |

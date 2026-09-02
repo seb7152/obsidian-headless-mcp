@@ -92,6 +92,11 @@ function init() {
     state.ready = false;
     state.error = err.message;
     console.error(`[embeddings] unavailable: ${err.message} — semantic search disabled, falling back to BM25`);
+    // Don't cache the failure forever: a transient issue (e.g. the HuggingFace
+    // download for EMBED_PROVIDER=local) should be retried on the next call —
+    // by the next scheduled embed pass, or by POST /api/search/reindex —
+    // rather than staying broken until the process restarts.
+    initPromise = null;
     throw err;
   });
   return initPromise;
