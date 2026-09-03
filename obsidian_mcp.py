@@ -1330,6 +1330,43 @@ def list_webhooks() -> str:
     except Exception as e:
         return f"Error listing webhooks: {e}"
 
+@mcp.tool()
+def list_api_tokens() -> str:
+    """List the REST API tokens: name, scopes, path restrictions, expiry, last use.
+
+    Secrets are never returned — only the SHA-256 of each token is stored, so a
+    token's plaintext exists only in the response that created it.
+
+    Read-only. Creating a token is deliberately NOT exposed here: this MCP server
+    proxies to the REST API with the root API_TOKEN, so every MCP caller would be
+    able to mint an unrestricted credential. Create tokens with an admin-scope
+    call to POST /api/tokens instead."""
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/tokens")
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error listing API tokens: {e}"
+
+
+@mcp.tool()
+def revoke_api_token(token_id: str) -> str:
+    """Revoke a REST API token by id (e.g. "tok_a1b2c3d4e5f6"). Takes effect on the
+    next request, with no restart.
+
+    Exposed here — unlike creation — because revoking only ever removes access:
+    the worst case is a denial you can undo by issuing a new token. The record is
+    kept so the audit trail (created, last used, last IP) survives."""
+    try:
+        response = api_client.delete(f"{OBSIDIAN_API_URL}/tokens/{token_id}")
+        if response.status_code == 404:
+            return f"No token with id {token_id}"
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error revoking API token: {e}"
+
+
 # ==================== RUN ====================
 
 ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"

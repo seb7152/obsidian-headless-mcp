@@ -6,26 +6,136 @@ const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
 const { db: vaultDb, getIndexerStatus, walkMd } = require('./vault-indexer');
 const webhooks = require('./webhooks');
+const tokens = require('./tokens');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const VAULT_PATH = process.env.VAULT_PATH || '/vault';
 const VAULT_PREFIX = VAULT_PATH.endsWith(path.sep) ? VAULT_PATH : VAULT_PATH + path.sep;
-const API_TOKEN = process.env.API_TOKEN || 'change-me-in-production';
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// Authentication middleware
+// Authentication: resolve the bearer token to an auth record (scopes + path
+// restrictions). The env API_TOKEN still works and keeps full admin access;
+// every other caller gets its own revocable token — see tokens.js.
 app.use((req, res, next) => {
   // Health check doesn't require auth
   if (req.path === '/health') {
     return next();
   }
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  if (!token || token !== API_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized: Invalid or missing API token' });
+  const presented = req.headers.authorization?.replace(/^Bearer /, '');
+  const auth = tokens.authenticate(presented, req.ip);
+  if (!auth) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid, revoked or expired API token' });
   }
+  req.auth = auth;
+  next();
+});
+
+// Authorization: scope check, then path check.
+//
+// Scope is derived from the method — reads need `read`, anything else needs
+// `write` — with a few endpoints demanding `admin` because they can bypass
+// path restrictions entirely (a webhook with include_body can stream any file
+// out of the vault; token management can mint an unrestricted token).
+const ADMIN_ONLY = [/^\/api\/webhooks(\/|$)/, /^\/api\/tokens(\/|$)/];
+
+// Strip the action suffix from /api/file/{path}/append etc. so the middleware
+// sees the file the request actually targets.
+const FILE_ROUTE = /^\/api\/file\/(.+?)(?:\/(links|append|move|body|patch))?$/;
+const DIR_ROUTE = /^\/api\/directory(?:\/(.+))?$/;
+
+function decodePath(p) {
+  try {
+    return decodeURIComponent(p);
+  } catch {
+    return p;
+  }
+}
+
+// Collect every vault path a request targets, from the URL and from the body.
+function targetPaths(req) {
+  const found = [];
+  const urlPath = decodePath(req.path);
+
+  let m = urlPath.match(FILE_ROUTE);
+  if (m) found.push({ path: m[1], field: 'path', file: true });
+
+  m = urlPath.match(DIR_ROUTE);
+  if (m && m[1]) found.push({ path: m[1], field: 'path', file: false });
+
+  const body = req.body || {};
+  if (Array.isArray(body.paths)) {
+    // /api/folders takes folder prefixes; the file endpoints take files.
+    const isFolder = urlPath.startsWith('/api/folders');
+    for (const p of body.paths) found.push({ path: p, field: 'paths', file: !isFolder });
+  }
+  if (body.destination_folder) {
+    found.push({ path: body.destination_folder, field: 'destination_folder', file: false });
+  }
+  if (body.destination) {
+    found.push({ path: body.destination, field: 'destination', file: true });
+  }
+  if (Array.isArray(body.moves)) {
+    for (const mv of body.moves) {
+      if (mv && mv.from) found.push({ path: mv.from, field: 'moves.from', file: false });
+      if (mv && mv.to) found.push({ path: mv.to, field: 'moves.to', file: false });
+    }
+  }
+
+  return found;
+}
+
+app.use((req, res, next) => {
+  if (req.path === '/health') return next();
+
+  const urlPath = decodePath(req.path);
+
+  if (ADMIN_ONLY.some(re => re.test(urlPath))) {
+    if (!tokens.hasScope(req.auth, 'admin')) {
+      return res.status(403).json({ error: 'Forbidden: scope "admin" required for this endpoint' });
+    }
+    return next();
+  }
+
+  // These are reads that happen to use POST (a body is the only way to pass a
+  // hundred paths, an SQL statement or a text blob), so they need `read`.
+  const READ_VIA_POST = ['/api/files/batch', '/api/query', '/api/links/check'];
+  const isRead = req.method === 'GET' || req.method === 'HEAD' ||
+    (req.method === 'POST' && READ_VIA_POST.includes(urlPath));
+
+  const needed = isRead ? 'read' : 'write';
+  if (!tokens.hasScope(req.auth, needed)) {
+    return res.status(403).json({ error: `Forbidden: scope "${needed}" required` });
+  }
+
+  if (!tokens.isPathRestricted(req.auth)) return next();
+
+  // Arbitrary SELECT over the index cannot be filtered safely — an aggregate
+  // can leak content from paths the token may not read without ever returning
+  // a path column. Path-restricted tokens must use /api/files instead.
+  if (urlPath === '/api/query') {
+    return res.status(403).json({
+      error: 'Forbidden: /api/query is unavailable to path-restricted tokens. Use /api/files with filters.'
+    });
+  }
+
+  if (urlPath === '/api/agent/context' && !tokens.canAccessFile(req.auth, 'agent.md')) {
+    return res.status(403).json({ error: 'Forbidden: path outside this token\'s scope' });
+  }
+
+  const denied = targetPaths(req)
+    .filter(t => !(t.file ? tokens.canAccessFile : tokens.canAccessPath)(req.auth, t.path))
+    .map(t => ({ field: t.field, path: t.path }));
+
+  if (denied.length > 0) {
+    return res.status(403).json({
+      error: 'Forbidden: path outside this token\'s scope',
+      denied
+    });
+  }
+
   next();
 });
 
@@ -255,6 +365,9 @@ app.get('/api/files', (req, res) => {
         }
         return true;
       })
+      // Drop anything this token may not read — silently, so a restricted
+      // token cannot probe for the existence of files outside its scope.
+      .filter(f => tokens.canAccessFile(req.auth, f.path))
       .sort((a, b) => {
         // Sort by date if available
         if (a.frontmatter.date && b.frontmatter.date) {
@@ -914,7 +1027,13 @@ app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
         return a.name.localeCompare(b.name);
       });
 
-    res.json({ path: relPath || '/', entries, count: entries.length });
+    // A directory stays listable when it merely leads to an allowed prefix,
+    // so browsing from the root still works; files need full read access.
+    const visible = entries.filter(e => e.type === 'directory'
+      ? tokens.canAccessPath(req.auth, e.path)
+      : tokens.canAccessFile(req.auth, e.path));
+
+    res.json({ path: relPath || '/', entries: visible, count: visible.length });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1027,7 +1146,8 @@ app.get('/api/search', (req, res) => {
       }
     }
 
-    res.json({ query, results, count: results.length, fuzzy });
+    const visible = results.filter(r => tokens.canAccessFile(req.auth, r.file));
+    res.json({ query, results: visible, count: visible.length, fuzzy });
   } catch (error) {
     res.json({ query, results: [], count: 0, error: error.message });
   }
@@ -1056,7 +1176,8 @@ app.get('/api/projects', (req, res) => {
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
 
-    res.json({ projects, count: projects.length });
+    const visible = projects.filter(p => tokens.canAccessPath(req.auth, p.path));
+    res.json({ projects: visible, count: visible.length });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1162,6 +1283,39 @@ app.get('/api/webhooks/:id', (req, res) => {
   res.json(wh);
 });
 
+// ---------------------------------------------------------------- API tokens
+// All admin-scope (enforced in the authorization middleware above).
+
+// List tokens — metadata only, never the secret
+app.get('/api/tokens', (req, res) => {
+  res.json({ tokens: tokens.list(), count: tokens.list().length });
+});
+
+// Get one token
+app.get('/api/tokens/:id', (req, res) => {
+  const t = tokens.get(req.params.id);
+  if (!t) return res.status(404).json({ error: 'Token not found' });
+  res.json(t);
+});
+
+// Create a token. The plaintext is in this response and nowhere else — only
+// its SHA-256 is stored, so it cannot be recovered later.
+app.post('/api/tokens', (req, res) => {
+  try {
+    res.status(201).json(tokens.create(req.body || {}));
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// Revoke a token — takes effect on the next request, no restart needed.
+// The record is kept so the audit trail survives.
+app.delete('/api/tokens/:id', (req, res) => {
+  const t = tokens.revoke(req.params.id);
+  if (!t) return res.status(404).json({ error: 'Token not found' });
+  res.json({ success: true, ...t });
+});
+
 // Create a webhook
 app.post('/api/webhooks', async (req, res) => {
   try {
@@ -1262,6 +1416,7 @@ app.listen(PORT, () => {
   console.log(`🚀 Obsidian API server running on port ${PORT}`);
   console.log(`📁 Vault path: ${VAULT_PATH}`);
   console.log(`🔐 Authentication: Bearer token required (except /health)`);
+  console.log(`🎟️  API tokens: ${tokens.list().filter(t => !t.revoked_at && !t.expired).length} active in ${tokens.CONFIG_PATH} (+ API_TOKEN from env)`);
   console.log(`📚 Documentation: GET /api/agent/context`);
   console.log(`🗑️  Trash retention: ${TRASH_RETENTION_DAYS > 0 ? TRASH_RETENTION_DAYS + ' days' : 'disabled'}`);
 });

@@ -63,7 +63,8 @@ OBSIDIAN_EMAIL=your-obsidian-email@example.com
 OBSIDIAN_PASSWORD=your-account-password       # Obsidian account password (for `ob login`)
 VAULT_PASSWORD=your-vault-encryption-password # Vault encryption key (Obsidian → Settings → Sync → Encryption)
 VAULT_NAME=Your-Vault-Name                    # Exact vault name in Obsidian Sync
-API_TOKEN=your-secret-token                   # Shared token for REST API + MCP auth
+API_TOKEN=your-secret-token                   # Root token for REST API + MCP auth
+                                              # (scoped, revocable tokens are minted from it)
 ```
 
 ### 3. Deploy
@@ -78,9 +79,13 @@ Base URL: `https://obsidian-api.DOMAIN`
 
 All endpoints require:
 ```
-Authorization: Bearer <API_TOKEN>
+Authorization: Bearer <token>
 ```
 Exception: `GET /health` is public.
+
+The token is either the `API_TOKEN` from the environment (full access, not
+revocable without a restart) or a **scoped API token** — named, revocable,
+optionally read-only, path-restricted and expiring. See [API tokens](#api-tokens).
 
 ### Health
 
@@ -438,6 +443,88 @@ curl -H "Authorization: Bearer $TOKEN" \
 - `watcher_closed: true` or a persistently old `last_event.at` while files keep changing on disk is a strong signal the watcher died and needs a restart.
 - `in_sync: false` means the indexed file count doesn't match the vault's actual `.md` file count — a full reindex (restart the service) will resync it.
 
+### API tokens
+
+Hand a caller its own credential instead of sharing `API_TOKEN`. Each token
+carries scopes, path restrictions and an optional expiry, and can be revoked on
+its own without disturbing anything else.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/tokens` | List tokens (metadata only — secrets are never returned) |
+| `GET` | `/api/tokens/{id}` | Get one token |
+| `POST` | `/api/tokens` | Create a token — the plaintext is in this response and nowhere else |
+| `DELETE` | `/api/tokens/{id}` | Revoke, effective on the next request |
+
+All four need the `admin` scope, which only `API_TOKEN` and tokens you
+explicitly create with it have.
+
+**Fields**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | **Required.** What this token is for — it is what you will read when deciding whether to revoke it. |
+| `scopes` | string[] | `read`, `write`, `admin`. Default `["read"]`. `write` implies `read`; `admin` implies both. |
+| `path_allow` | string[] | Vault-relative prefixes this token may reach. Empty = whole vault. |
+| `path_deny` | string[] | Prefixes it may never reach. **Deny always wins over allow.** |
+| `expires_at` | `YYYY-MM-DD` | After this date the token stops authenticating. Optional, but set one for anything living on a machine you don't fully control. |
+
+Prefixes match on whole path segments, so `10_Context/Perso` covers
+`10_Context/Perso/profil.md` but never `10_Context/Perso2/`.
+
+```bash
+# A read-only token for a machine that should never see the personal zone
+curl -X POST -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"work laptop","scopes":["read"],
+       "path_allow":["20_Projects/Pro","30_Knowledge"],
+       "path_deny":["10_Context/Perso"],
+       "expires_at":"2026-12-01"}' \
+  https://obsidian-api.yourdomain.com/api/tokens
+# → {"token":"obsv_…","id":"tok_a1b2c3d4e5f6","name":"work laptop",…}
+#   Copy the token now — only its SHA-256 is stored, it cannot be shown again.
+
+# See who is using what
+curl -H "Authorization: Bearer $API_TOKEN" https://obsidian-api.yourdomain.com/api/tokens
+# → each entry carries last_used_at and last_used_ip
+
+# Revoke
+curl -X DELETE -H "Authorization: Bearer $API_TOKEN" \
+  https://obsidian-api.yourdomain.com/api/tokens/tok_a1b2c3d4e5f6
+```
+
+**How restrictions are enforced**
+
+- Endpoints addressing one path (`/api/file/{path}` and its `/append`, `/move`,
+  `/body`, `/patch`, `/links` variants, `/api/directory/{path}`) return `403`
+  with the offending path.
+- Endpoints taking paths in the body (`/api/files/batch`, `/api/files/move`,
+  `/api/folders`, `/api/folders/move`) reject the **whole** request if any path
+  is out of scope, rather than silently doing part of the work.
+- Listing endpoints (`/api/files`, `/api/search`, `/api/directory`,
+  `/api/projects`) filter results silently, so a restricted token cannot probe
+  for the existence of files it may not read. A directory that merely leads to
+  an allowed prefix stays browsable; its files do not become readable.
+- **`/api/query` is refused to path-restricted tokens.** An arbitrary `SELECT`
+  cannot be filtered safely — an aggregate such as `group_concat(path)` would
+  leak content without ever returning a path column. Use `/api/files` with
+  frontmatter filters, which is properly scoped. Unrestricted tokens keep SQL.
+- **`/api/webhooks` and `/api/tokens` require `admin`**, because both can bypass
+  path restrictions: a webhook with `include_body` streams file contents to an
+  arbitrary URL, and token creation can mint an unrestricted credential.
+- `/api/files/batch`, `/api/query` and `/api/links/check` are reads that use
+  POST for their body, and need `read`, not `write`.
+
+**Storage.** `/data/tokens.json` (the `sqlite-data` volume), outside the synced
+vault, written atomically. Override with `TOKENS_CONFIG_PATH`. Only SHA-256
+hashes are kept: a leak of that file yields nothing usable. Revoked tokens stay
+in the file so their audit trail survives.
+
+**From MCP**: `list_api_tokens()` and `revoke_api_token(id)` are exposed.
+Creation deliberately is not — the MCP server proxies to the REST API with the
+root `API_TOKEN`, so exposing creation would let any MCP caller mint an
+unrestricted credential. Revocation is safe to expose because it only ever
+removes access.
+
 ### Webhooks
 
 Notify external systems (n8n, Zapier, your own service…) whenever vault files change. The embedded watcher detects `add` / `change` / `unlink` on `.md` files and POSTs a JSON payload to your URL. Webhooks are **created and managed only through the REST API** — the MCP server can list them but never create them.
@@ -637,6 +724,18 @@ Read and write [Document Comments](https://github.com/kylemcd/obsidian-document-
 |------|-------------|
 | `list_webhooks()` | List active vault-change webhooks (secrets redacted). Webhooks are created/managed via the REST API, not from MCP. |
 
+#### API tokens
+
+| Tool | Description |
+|------|-------------|
+| `list_api_tokens()` | List the scoped REST API tokens — name, scopes, path restrictions, expiry, last use. Secrets are never returned. |
+| `revoke_api_token(token_id)` | Revoke a token by id, effective on the next request. |
+
+Creation is deliberately absent: this server proxies to the REST API with the
+root `API_TOKEN`, so a `create` tool would let any MCP caller mint an
+unrestricted credential. Create tokens with `POST /api/tokens` instead. See
+[API tokens](#api-tokens).
+
 ---
 
 ## Troubleshooting
@@ -700,6 +799,11 @@ SQLite indexer (better-sqlite3). Bootstraps a full index on first start, then ke
 
 ### `webhooks.js`
 Webhook configuration, matching, and delivery. Persists webhooks to `/data/webhooks.json` (atomic writes), filters changes by folder glob and frontmatter subset, and POSTs signed payloads with bounded concurrency, timeouts, retries, and SSRF protection. Created/managed via the REST API; listed read-only via MCP.
+
+### `tokens.js`
+Scoped API tokens: creation, hashing, lookup and the allow/deny path logic.
+Persists to `/data/tokens.json` (atomic writes), stores SHA-256 only, and never
+returns a secret after creation.
 
 ### `obsidian_mcp.py`
 FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes
