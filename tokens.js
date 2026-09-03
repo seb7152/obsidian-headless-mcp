@@ -61,21 +61,46 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-// Normalise a vault-relative path for prefix comparison:
-// backslashes → "/", no leading "./" or "/", no trailing "/".
+// Canonicalise a vault-relative path for prefix comparison: "." and ".."
+// segments resolved, leading/trailing/duplicate "/" dropped.
+//
+// Resolving the dot segments is load-bearing, not cosmetic. Authorization runs
+// on the path as sent, but the filesystem only sees it once path.join() has
+// collapsed it. Compared raw, "20_Projects/Pro/../../10_Context/Perso/x.md"
+// starts with an allowed prefix of "20_Projects/Pro" yet reads
+// /vault/10_Context/Perso/x.md — inside the vault, so the per-route vault-root
+// guard passes it too. The mirror trick walks through a path_deny prefix.
+//
+// Returns null for a path that cannot be authorized at all:
+//   - it climbs above the vault root;
+//   - it contains a backslash. The vault is POSIX, where "\" is an ordinary
+//     filename character: treating it as a separator over-matches allow
+//     prefixes, treating it as text over-matches deny prefixes. Refusing is the
+//     only reading that fails closed, and Obsidian forbids "\" in note names.
 function normalizeRel(p) {
-  return String(p == null ? '' : p)
-    .replace(/\\/g, '/')
-    .replace(/^\.\//, '')
-    .replace(/^\/+/, '')
-    .replace(/\/+$/, '');
+  const raw = String(p == null ? '' : p);
+  if (raw.includes('\\')) return null;
+
+  const out = [];
+  for (const seg of raw.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') {
+      if (out.length === 0) return null; // climbs out of the vault
+      out.pop();
+      continue;
+    }
+    out.push(seg);
+  }
+  return out.join('/');
 }
 
 // True when `rel` is `prefix` itself or lives underneath it. Compared segment
 // by segment so that "10_Context/Perso" never matches "10_Context/Perso2".
+// A path that cannot be canonicalised matches nothing — callers refuse it.
 function isUnder(rel, prefix) {
   const r = normalizeRel(rel);
   const p = normalizeRel(prefix);
+  if (r === null || p === null) return false;
   if (p === '') return true; // empty prefix = whole vault
   return r === p || r.startsWith(p + '/');
 }
@@ -133,6 +158,16 @@ function create({ name, scopes, path_allow, path_deny, expires_at }) {
     if (val !== undefined && !Array.isArray(val)) {
       throw Object.assign(new Error(`"${field}" must be an array of vault-relative prefixes`), { status: 400 });
     }
+    // Silently dropping a prefix we cannot canonicalise would mint a token
+    // wider than the one asked for — a dropped path_deny is a hole.
+    for (const prefix of val || []) {
+      if (typeof prefix !== 'string' || !normalizeRel(prefix)) {
+        throw Object.assign(
+          new Error(`"${field}" entry ${JSON.stringify(prefix)} is not a vault-relative prefix`),
+          { status: 400 }
+        );
+      }
+    }
   }
 
   if (expires_at !== undefined && expires_at !== null) {
@@ -150,8 +185,8 @@ function create({ name, scopes, path_allow, path_deny, expires_at }) {
     name,
     hash: sha256(secret),
     scopes: wanted,
-    path_allow: (path_allow || []).map(normalizeRel).filter(Boolean),
-    path_deny: (path_deny || []).map(normalizeRel).filter(Boolean),
+    path_allow: (path_allow || []).map(normalizeRel),
+    path_deny: (path_deny || []).map(normalizeRel),
     expires_at: expires_at || null,
     created_at: today(),
     last_used_at: null,
@@ -240,6 +275,7 @@ function isPathRestricted(auth) {
 function canAccessPath(auth, relPath) {
   if (!auth) return false;
   const rel = normalizeRel(relPath);
+  if (rel === null) return false; // traversal or backslash: never authorized
 
   for (const denied of auth.path_deny || []) {
     if (isUnder(rel, denied)) return false;
@@ -259,6 +295,7 @@ function canAccessPath(auth, relPath) {
 function canAccessFile(auth, relPath) {
   if (!auth) return false;
   const rel = normalizeRel(relPath);
+  if (rel === null) return false; // traversal or backslash: never authorized
 
   for (const denied of auth.path_deny || []) {
     if (isUnder(rel, denied)) return false;

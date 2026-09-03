@@ -42,14 +42,90 @@ test('isUnder does not match a sibling sharing a name prefix', () => {
   assert.equal(tokens.isUnder('10_Context/Personal.md', '10_Context/Perso'), false);
 });
 
-test('isUnder normalises separators, leading and trailing slashes', () => {
+test('isUnder normalises leading, trailing and duplicate slashes', () => {
   assert.equal(tokens.isUnder('/20_Projects/Pro/a.md', '20_Projects/Pro/'), true);
-  assert.equal(tokens.isUnder('20_Projects\\Pro\\a.md', '20_Projects/Pro'), true);
-  assert.equal(tokens.isUnder('./20_Projects/Pro/a.md', '20_Projects/Pro'), true);
+  assert.equal(tokens.isUnder('20_Projects//Pro/a.md', '20_Projects/Pro'), true);
+  assert.equal(tokens.isUnder('./20_Projects/Pro/./a.md', '20_Projects/Pro'), true);
 });
 
 test('an empty prefix covers the whole vault', () => {
   assert.equal(tokens.isUnder('anything/at/all.md', ''), true);
+});
+
+// ---------------------------------------------------------------------------
+// Path traversal
+//
+// The authorization check runs on the path as sent; the filesystem sees it only
+// after path.join() has collapsed the dot segments. Anything that reads
+// differently in those two places is a way through allow and deny alike, and
+// the per-route vault-root guard does not catch it — the target stays inside
+// the vault, just not where the token may go.
+// ---------------------------------------------------------------------------
+
+test('".." segments are resolved before the prefix is compared', () => {
+  // Reads /vault/10_Context/Perso/x.md while starting with the allowed prefix.
+  assert.equal(
+    tokens.isUnder('20_Projects/Pro/../../10_Context/Perso/x.md', '20_Projects/Pro'),
+    false
+  );
+  // And a legitimate ".." that stays inside the prefix still matches.
+  assert.equal(tokens.isUnder('20_Projects/Pro/MEN/../a.md', '20_Projects/Pro'), true);
+});
+
+test('a path climbing out of the vault matches nothing', () => {
+  assert.equal(tokens.normalizeRel('../../etc/passwd'), null);
+  assert.equal(tokens.isUnder('../../etc/passwd', ''), false);
+});
+
+test('a backslash never stands in for a separator', () => {
+  // The vault is POSIX: "\\" is an ordinary filename character, so a path
+  // carrying one is refused rather than read as a folder boundary.
+  assert.equal(tokens.normalizeRel('20_Projects\\Pro\\a.md'), null);
+  assert.equal(tokens.isUnder('20_Projects\\Pro\\a.md', '20_Projects/Pro'), false);
+});
+
+test('traversal is refused by both authorization helpers, allow and deny alike', () => {
+  const allow = { scopes: ['read'], path_allow: ['20_Projects/Pro'], path_deny: [] };
+  const deny = { scopes: ['read'], path_allow: [], path_deny: ['10_Context/Perso'] };
+
+  const escape = '20_Projects/Pro/../../10_Context/Perso/x.md';
+  assert.equal(tokens.canAccessFile(allow, escape), false);
+  assert.equal(tokens.canAccessPath(allow, escape), false);
+
+  // Walking into a denied folder from elsewhere must not slip past the deny.
+  const through = '20_Projects/../10_Context/Perso/x.md';
+  assert.equal(tokens.canAccessFile(deny, through), false);
+  assert.equal(tokens.canAccessPath(deny, through), false);
+
+  // A token with no restrictions at all is unaffected by any of this.
+  const root = { scopes: ['read'], path_allow: [], path_deny: [] };
+  assert.equal(tokens.canAccessFile(root, '20_Projects/Pro/a.md'), true);
+});
+
+test('a prefix that cannot be canonicalised is refused at creation', () => {
+  // Dropping it silently would mint a token wider than the one asked for.
+  assert.throws(
+    () => tokens.create({ name: 'bad allow', path_allow: ['../outside'] }),
+    /not a vault-relative prefix/
+  );
+  assert.throws(
+    () => tokens.create({ name: 'bad deny', path_deny: ['10_Context\\Perso'] }),
+    /not a vault-relative prefix/
+  );
+  assert.throws(
+    () => tokens.create({ name: 'empty', path_allow: ['/'] }),
+    /not a vault-relative prefix/
+  );
+});
+
+test('creation canonicalises the prefixes it stores', () => {
+  const created = tokens.create({
+    name: 'normalised',
+    path_allow: ['/20_Projects/Pro/'],
+    path_deny: ['./20_Projects/Pro/Interne']
+  });
+  assert.deepEqual(created.path_allow, ['20_Projects/Pro']);
+  assert.deepEqual(created.path_deny, ['20_Projects/Pro/Interne']);
 });
 
 // ---------------------------------------------------------------------------
