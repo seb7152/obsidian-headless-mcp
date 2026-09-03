@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hmac
 import httpx
 import os
 import random
@@ -1580,12 +1581,16 @@ def _admin_tools_called(body: bytes) -> set:
 class AuthMiddleware:
     """Accepts two authentication schemes, checked in this order:
 
-    1. Legacy static token (kept for continuity — Claude Code CLI / Codex CLI use this
-       today, and it's simpler for them than OAuth):
-         - token as URL path prefix /{API_TOKEN}/...
-         - `Authorization: Bearer <API_TOKEN>` exact match
-       The URL-path variant is intended to be removed later; the static bearer token
-       is intended to stay.
+    1. Static token, as `Authorization: Bearer <API_TOKEN>` (kept for continuity —
+       Claude Code CLI / Codex CLI use this today, and it's simpler for them than
+       OAuth). Compared in constant time.
+
+       The URL-path variant (`/{API_TOKEN}/...`) was removed on 2026-09-03: a token
+       in the path is logged by every proxy, reverse proxy and access log it passes
+       through, ends up in browser history and Referer headers, and cannot be
+       rotated out of any of those. A header is not logged by default anywhere in
+       that chain. Clients configured that way must move the token to the
+       Authorization header.
 
     2. OAuth 2.1 resource-server flow (MCP spec, revisions 2025-06 / 2025-11), used by
        clients like claude.ai: any other bearer token is validated against Zitadel's
@@ -1628,17 +1633,13 @@ class AuthMiddleware:
             if decoded.lower().startswith("bearer "):
                 bearer_token = decoded[7:].strip()
 
-        # -- 1. Legacy static token (path prefix or exact bearer match) --
-        path_has_static_token = bool(API_TOKEN) and path.startswith(f"/{API_TOKEN}")
-        header_matches_static = bool(API_TOKEN) and bearer_token == API_TOKEN
+        # -- 1. Static token, Authorization header only (constant-time compare) --
+        header_matches_static = bool(API_TOKEN) and bearer_token is not None and hmac.compare_digest(
+            bearer_token, API_TOKEN
+        )
 
-        if path_has_static_token or header_matches_static:
+        if header_matches_static:
             scope = dict(scope)
-            if path_has_static_token:
-                new_path = path[len(f"/{API_TOKEN}"):] or "/"
-                scope["path"] = new_path
-                raw_path = scope.get("raw_path", path.encode())
-                scope["raw_path"] = raw_path[len(f"/{API_TOKEN}".encode()):] or b"/"
             new_headers = [(k, v) for k, v in headers if k.lower() != b"host"]
             new_headers.append((b"host", b"localhost"))
             scope["headers"] = new_headers
@@ -1742,7 +1743,7 @@ if __name__ == "__main__":
 
     print(f"Starting Obsidian MCP Server on port {PORT}")
     print(f"Connected to Obsidian API at: {OBSIDIAN_API_URL}")
-    print(f"🔐 Authentication: legacy static token (path/Bearer) + OAuth 2.1 via Zitadel ({ZITADEL_ISSUER}), role required: {OAUTH_REQUIRED_ROLE}, admin role for token management: {OAUTH_ADMIN_ROLE}")
+    print(f"🔐 Authentication: static Bearer token + OAuth 2.1 via Zitadel ({ZITADEL_ISSUER}), role required: {OAUTH_REQUIRED_ROLE}, admin role for token management: {OAUTH_ADMIN_ROLE}")
 
     mcp_app = mcp.streamable_http_app()
     app = AuthMiddleware(mcp_app)

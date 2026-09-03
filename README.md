@@ -641,7 +641,7 @@ Exposes the vault as MCP tools and resources for AI agents. Base URL: `https://m
 
 ### Authentication
 
-Three methods are supported, checked in this order:
+Two methods are supported, checked in this order:
 
 **1. Authorization header with the static token (recommended for Claude Code CLI / Codex CLI —
 simpler than OAuth for those clients)**
@@ -659,19 +659,14 @@ simpler than OAuth for those clients)**
 }
 ```
 
-**2. Token in URL path (legacy — planned for removal later)**
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "url": "https://mcp.yourdomain.com/<API_TOKEN>",
-      "transport": "http"
-    }
-  }
-}
-```
+> **Removed 2026-09-03 — token in the URL path.** `https://mcp.DOMAIN/<API_TOKEN>`
+> is no longer accepted and returns `401`. A token in a URL is written to every
+> proxy and access log it crosses, lands in browser history and `Referer`
+> headers, and cannot be scrubbed from any of them afterwards; a header is not
+> logged by default anywhere in that chain. Clients configured that way must
+> move the token into `Authorization: Bearer`, as in method 1 above.
 
-**3. OAuth 2.1 + PKCE (Zitadel)** — used automatically by OAuth-aware clients like claude.ai
+**2. OAuth 2.1 + PKCE (Zitadel)** — used automatically by OAuth-aware clients like claude.ai
 when no static token is presented:
 ```json
 {
@@ -793,7 +788,7 @@ Callers presenting the static `API_TOKEN` pass this gate. That is not a
 loophole so much as an acknowledgement: `API_TOKEN` is already root on the REST
 API, so anyone holding it can `POST /api/tokens` directly. The role separation
 is meaningful **between OAuth identities**, and becomes airtight once the static
-and URL-path token paths are removed from the MCP server.
+Bearer path is removed from the MCP server too (the URL-path one already is).
 
 ---
 
@@ -855,8 +850,8 @@ which half of the index is actually working.
   middleware before the request reaches the tool. Note that the static
   `API_TOKEN` also passes, since it is already root on the REST API and could
   call `POST /api/tokens` directly — the separation bites between OAuth
-  identities, and becomes absolute once the static/URL-path token paths are
-  retired.
+  identities, and would become absolute if the static Bearer path were retired
+  too (the URL-path variant already is).
 - **MCP OAuth**: the MCP server (`mcp.DOMAIN`) also accepts OAuth 2.1 + PKCE via Zitadel
   alongside the static `API_TOKEN`. For OAuth requests, every bearer token is validated
   against Zitadel's `/oidc/v1/userinfo`, and access is denied (`403`) unless the token's
@@ -864,8 +859,9 @@ which half of the index is actually working.
   Zitadel doesn't support RFC 8707 resource indicators: a token issued for the shared
   `Claude-web` client can carry an audience covering every MCP server in the `mcp-servers`
   project, not just this one, so a valid signature alone isn't proof of authorization for
-  this specific server. The URL-path token variant is planned for removal later; the
-  static Bearer token is intended to stay alongside OAuth.
+  this specific server. The URL-path token variant was removed on 2026-09-03 (a
+  token in a URL is logged everywhere it travels and cannot be scrubbed back
+  out); the static Bearer token, compared in constant time, stays alongside OAuth.
 
 ---
 
@@ -1010,7 +1006,7 @@ returns a secret after creation.
 
 ### `obsidian_mcp.py`
 FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes
-`AuthMiddleware`, which accepts either the legacy static token (URL-path or Bearer header) or
+`AuthMiddleware`, which accepts either the static token (Bearer header, constant-time compare) or
 an OAuth 2.1 access token validated against Zitadel, plus the `/.well-known/oauth-protected-resource`
 metadata endpoint required by OAuth-aware MCP clients.
 
