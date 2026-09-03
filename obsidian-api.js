@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const yaml = require('js-yaml');
 const { spawnSync } = require('child_process');
-const { db: vaultDb, getIndexerStatus, walkMd } = require('./vault-indexer');
+const { db: vaultDb, getIndexerStatus, walkMd, searchIndex } = require('./vault-indexer');
 const webhooks = require('./webhooks');
 const tokens = require('./tokens');
 
@@ -1039,117 +1039,182 @@ app.get(/^\/api\/directory(?:\/(.+))?$/, (req, res) => {
   }
 });
 
-// Search in vault — supports keyword (default) and fuzzy modes with optional date filters
-// Query params: q (required), fuzzy=true, since=YYYY-MM-DD, before=YYYY-MM-DD
-app.get('/api/search', (req, res) => {
-  const query = req.query.q;
-  const fuzzy = req.query.fuzzy === 'true';
-  const since = req.query.since;
-  const before = req.query.before;
+// Legacy literal search kept behind mode=grep / mode=fuzzy.
+//
+// grep  — case-insensitive substring over raw file content. No ranking, and it
+//         rescans the vault on every call, but it is the only mode that finds an
+//         exact string (an ID, a URL, a code snippet) regardless of tokenisation.
+// fuzzy — Levenshtein similarity on note titles, for "I half-remember the name".
+//
+// Everything else now goes through the chunked BM25 + semantic index.
+function legacySearch(query, { fuzzy = false, since = null, before = null } = {}) {
+  const results = [];
 
+  if (fuzzy) {
+    const allFiles = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
+      .stdout.split('\n').filter(f => f);
+
+    const queryLower = query.toLowerCase();
+
+    for (const filePath of allFiles) {
+      try {
+        const relativePath = path.relative(VAULT_PATH, filePath);
+        const baseName = path.basename(relativePath, '.md');
+        const baseNameLower = baseName.toLowerCase();
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const { frontmatter, body } = parseFrontmatter(content);
+
+        // Title fuzzy score
+        const isSubstring = baseNameLower.includes(queryLower) || queryLower.includes(baseNameLower);
+        const dist = levenshtein(queryLower, baseNameLower);
+        const similarity = 1 - dist / Math.max(queryLower.length, baseNameLower.length, 1);
+        let score = isSubstring ? similarity + 0.5 : similarity;
+
+        // Content keyword bonus
+        const bodyLower = body.toLowerCase();
+        const contentHit = bodyLower.includes(queryLower);
+        if (contentHit) score += 0.3;
+
+        if (score <= 0.4 && !contentHit) continue;
+
+        const d = noteDate(relativePath, frontmatter);
+        if (d && since && d < since) continue;
+        if (d && before && d > before) continue;
+
+        results.push({
+          file: relativePath,
+          title: frontmatter.title || baseName,
+          score: Math.round(score * 100) / 100,
+          matches: matchingLines(body, queryLower),
+          date: d || null
+        });
+      } catch {}
+    }
+
+    results.sort((a, b) => b.score - a.score);
+  } else {
+    const grep = spawnSync('grep', ['-r', '-i', '-l', query, '--include=*.md', VAULT_PATH], { encoding: 'utf-8' });
+    const matchedFiles = (grep.stdout || '').split('\n').filter(f => f);
+
+    for (const filePath of matchedFiles) {
+      try {
+        const relativePath = path.relative(VAULT_PATH, filePath);
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const { frontmatter, body } = parseFrontmatter(content);
+
+        const d = noteDate(relativePath, frontmatter);
+        if (d && since && d < since) continue;
+        if (d && before && d > before) continue;
+
+        results.push({
+          file: relativePath,
+          title: frontmatter.title || path.basename(relativePath, '.md'),
+          matches: matchingLines(body, query.toLowerCase()),
+          date: d || null
+        });
+      } catch {}
+    }
+  }
+
+  return results;
+}
+
+// Note date: frontmatter `created`, else a YYYY-MM-DD filename prefix.
+function noteDate(relativePath, frontmatter) {
+  let dateField = frontmatter.created;
+  if (!dateField) {
+    const dateMatch = path.basename(relativePath).match(/^(\d{4}-\d{2}-\d{2})/);
+    if (dateMatch) dateField = dateMatch[1];
+  }
+  return normalizeDate(dateField);
+}
+
+function matchingLines(body, queryLower, max = 3) {
+  return body.split('\n')
+    .filter(line => line.toLowerCase().includes(queryLower))
+    .map(line => line.trim())
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+// Search in vault.
+//
+// Query params:
+//   q       (required) the search text
+//   mode    auto (default) | hybrid | semantic | bm25 | grep | fuzzy
+//             auto     — hybrid if the semantic index is ready, else bm25
+//             hybrid   — BM25 + vector, fused with RRF
+//             semantic — vector only ("notes about X" with no shared wording)
+//             bm25     — ranked full-text only
+//             grep     — legacy literal substring scan
+//             fuzzy    — legacy title similarity
+//   rerank  true to reorder the candidates with the cloud reranker (off by
+//           default: it ships candidate text to a third party)
+//   limit   max notes to return (default 20, max 100)
+//   path    restrict to a vault folder prefix
+//   since / before   YYYY-MM-DD filters on the note date
+//   fuzzy=true       legacy alias for mode=fuzzy
+app.get('/api/search', async (req, res) => {
+  const query = req.query.q;
   if (!query) {
     return res.status(400).json({ error: 'Query parameter (q) required' });
   }
 
+  const legacyFuzzy = req.query.fuzzy === 'true';
+  const mode = String(req.query.mode || (legacyFuzzy ? 'fuzzy' : 'auto')).toLowerCase();
+  const since = req.query.since || null;
+  const before = req.query.before || null;
+  const limit = Math.min(Math.max(Number(req.query.limit) || 20, 1), 100);
+
   try {
-    let results = [];
-
-    if (fuzzy) {
-      // Fuzzy: score files by title similarity + case-insensitive content presence
-      const allFiles = spawnSync('find', [VAULT_PATH, '-name', '*.md', '-type', 'f'], { encoding: 'utf-8' })
-        .stdout.split('\n').filter(f => f);
-
-      const queryLower = query.toLowerCase();
-
-      for (const filePath of allFiles) {
-        try {
-          const relativePath = path.relative(VAULT_PATH, filePath);
-          const baseName = path.basename(relativePath, '.md');
-          const baseNameLower = baseName.toLowerCase();
-          const content = fs.readFileSync(filePath, 'utf-8');
-          const { frontmatter, body } = parseFrontmatter(content);
-
-          // Title fuzzy score
-          const isSubstring = baseNameLower.includes(queryLower) || queryLower.includes(baseNameLower);
-          const dist = levenshtein(queryLower, baseNameLower);
-          const similarity = 1 - dist / Math.max(queryLower.length, baseNameLower.length, 1);
-          let score = isSubstring ? similarity + 0.5 : similarity;
-
-          // Content keyword bonus
-          const bodyLower = body.toLowerCase();
-          const contentHit = bodyLower.includes(queryLower);
-          if (contentHit) score += 0.3;
-
-          if (score <= 0.4 && !contentHit) continue;
-
-          // Date filtering
-          let dateField = frontmatter.created;
-          if (!dateField) {
-            const dateMatch = path.basename(relativePath).match(/^(\d{4}-\d{2}-\d{2})/);
-            if (dateMatch) dateField = dateMatch[1];
-          }
-          const d = normalizeDate(dateField);
-          if (d && since && d < since) continue;
-          if (d && before && d > before) continue;
-
-          const matches = body.split('\n')
-            .filter(line => line.toLowerCase().includes(queryLower))
-            .map(line => line.trim())
-            .filter(line => line)
-            .slice(0, 3);
-
-          results.push({
-            file: relativePath,
-            title: frontmatter.title || baseName,
-            score: Math.round(score * 100) / 100,
-            matches,
-            date: d || null
-          });
-        } catch {}
-      }
-
-      results.sort((a, b) => b.score - a.score);
-    } else {
-      // Keyword: case-insensitive grep to find matching files, then apply date filter
-      const grep = spawnSync('grep', ['-r', '-i', '-l', query, '--include=*.md', VAULT_PATH], { encoding: 'utf-8' });
-      const matchedFiles = (grep.stdout || '').split('\n').filter(f => f);
-
-      for (const filePath of matchedFiles) {
-        try {
-          const relativePath = path.relative(VAULT_PATH, filePath);
-          const content = fs.readFileSync(filePath, 'utf-8');
-          const { frontmatter, body } = parseFrontmatter(content);
-
-          // Date filtering
-          let dateField = frontmatter.created;
-          if (!dateField) {
-            const dateMatch = path.basename(relativePath).match(/^(\d{4}-\d{2}-\d{2})/);
-            if (dateMatch) dateField = dateMatch[1];
-          }
-          const d = normalizeDate(dateField);
-          if (d && since && d < since) continue;
-          if (d && before && d > before) continue;
-
-          const matches = body.split('\n')
-            .filter(line => line.toLowerCase().includes(query.toLowerCase()))
-            .map(line => line.trim())
-            .filter(line => line)
-            .slice(0, 3);
-
-          results.push({
-            file: relativePath,
-            title: frontmatter.title || path.basename(relativePath, '.md'),
-            matches,
-            date: d || null
-          });
-        } catch {}
-      }
+    if (mode === 'grep' || mode === 'fuzzy') {
+      // Filter before slicing, so a restricted token still gets a full page.
+      const results = legacySearch(query, { fuzzy: mode === 'fuzzy', since, before })
+        .filter(r => tokens.canAccessFile(req.auth, r.file));
+      return res.json({
+        query, mode, results: results.slice(0, limit), count: Math.min(results.length, limit),
+        fuzzy: mode === 'fuzzy'
+      });
     }
 
-    const visible = results.filter(r => tokens.canAccessFile(req.auth, r.file));
-    res.json({ query, results: visible, count: visible.length, fuzzy });
+    const out = await searchIndex.search(query, {
+      mode,
+      limit,
+      since,
+      before,
+      pathPrefix: req.query.path || null,
+      // Reranking ships the matching passages to a third party, and it runs
+      // inside the index — before the scope filter below. A path-restricted
+      // token must not be able to send content it cannot itself read, so it
+      // does not get the reranker.
+      rerank: req.query.rerank === 'true' && !tokens.isPathRestricted(req.auth)
+    });
+    const visible = (out.results || []).filter(r => tokens.canAccessFile(req.auth, r.file));
+    // `fuzzy` is echoed for backwards compatibility with existing callers.
+    res.json({ ...out, results: visible, count: visible.length, fuzzy: false });
   } catch (error) {
-    res.json({ query, results: [], count: 0, error: error.message });
+    res.status(500).json({ query, mode, results: [], count: 0, error: error.message });
+  }
+});
+
+// Health of the hybrid search index: chunk counts, embedding progress, and
+// which providers are actually configured.
+app.get('/api/search/status', (req, res) => {
+  try {
+    res.json(searchIndex.getStatus());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Kick the background embedding worker (e.g. after fixing an API key, or after
+// the provider was down while notes changed). Returns immediately.
+app.post('/api/search/reindex', (req, res) => {
+  try {
+    searchIndex.scheduleEmbedding(0);
+    res.json({ success: true, message: 'Embedding worker scheduled', status: searchIndex.getStatus() });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1260,6 +1325,24 @@ app.get('/api/sync/status', (req, res) => {
     };
   } catch (error) {
     response.indexer = { error: error.message };
+  }
+
+  // Hybrid-search health rides along here: a stale chunk index or a stalled
+  // embedding worker degrades search silently, exactly like a stalled watcher.
+  try {
+    const search = searchIndex.getStatus();
+    response.search = {
+      chunks: search.chunks,
+      embedded: search.embedded,
+      pending: search.pending,
+      semantic_ready: search.semantic_ready,
+      embed_provider: search.embeddings?.provider,
+      embed_model: search.embeddings?.model,
+      embed_error: search.embeddings?.error || search.embed_worker?.last_error || null,
+      rerank_available: search.rerank?.available
+    };
+  } catch (error) {
+    response.search = { error: error.message };
   }
 
   res.json(response);
@@ -1419,4 +1502,6 @@ app.listen(PORT, () => {
   console.log(`🎟️  API tokens: ${tokens.list().filter(t => !t.revoked_at && !t.expired).length} active in ${tokens.CONFIG_PATH} (+ API_TOKEN from env)`);
   console.log(`📚 Documentation: GET /api/agent/context`);
   console.log(`🗑️  Trash retention: ${TRASH_RETENTION_DAYS > 0 ? TRASH_RETENTION_DAYS + ' days' : 'disabled'}`);
+  const search = searchIndex.getStatus();
+  console.log(`🔎 Search: ${search.chunks} chunks, ${search.embedded} embedded (${search.embeddings?.provider}/${search.embeddings?.model}), rerank ${search.rerank?.available ? 'on' : 'off'}`);
 });

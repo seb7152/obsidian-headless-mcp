@@ -343,26 +343,56 @@ def append_to_file(file_path: str, content: str) -> str:
         return f"Error: {e}"
 
 @mcp.tool()
-def search_vault(query: str, fuzzy: bool = False, since: str = "", before: str = "") -> str:
-    """Search for notes in the vault by keyword, with optional fuzzy matching and date filters.
+def search_vault(
+    query: str,
+    mode: str = "auto",
+    rerank: bool = False,
+    limit: int = 20,
+    fuzzy: bool = False,
+    since: str = "",
+    before: str = "",
+    path: str = "",
+) -> str:
+    """Search the vault. Hybrid (keyword + meaning) by default.
 
-    Regular search is case-insensitive and matches note content.
-    Fuzzy search additionally scores notes by title similarity.
+    Notes are indexed as chunks, so a hit points at the relevant section of a
+    long note rather than just the file.
+
+    Choosing a mode:
+      auto     — default. Hybrid when the semantic index is ready, keyword
+                 ranking otherwise. Use this unless you have a reason not to.
+      hybrid   — BM25 + vector search fused. Best general recall.
+      semantic — meaning only. Use when the wording of the query is unlikely to
+                 appear in the notes ("notes about switching hosting provider"
+                 finding a note that only says "migration serveur").
+      bm25     — ranked full-text only. Use for names, acronyms, jargon.
+      grep     — literal case-insensitive substring, unranked. Use to find an
+                 exact string: an ID, a URL, a code snippet.
+      fuzzy    — title similarity, for a half-remembered note name.
 
     Args:
-        query: Text or keyword to search for
-        fuzzy: Enable fuzzy matching on note titles in addition to content (default: False)
-        since: Only return notes created on or after this date, format YYYY-MM-DD (optional)
-        before: Only return notes created on or before this date, format YYYY-MM-DD (optional)
+        query: What to search for
+        mode: auto | hybrid | semantic | bm25 | grep | fuzzy (default: auto)
+        rerank: Reorder results with a cloud reranker for higher precision.
+            Slower, costs money, and sends the matching passages to a third
+            party — use it for a hard query, not by default.
+        limit: Max notes to return (default 20, max 100)
+        fuzzy: Legacy alias for mode="fuzzy"
+        since: Only notes dated on or after this date, YYYY-MM-DD (optional)
+        before: Only notes dated on or before this date, YYYY-MM-DD (optional)
+        path: Restrict the search to a vault folder, e.g. "20_Projects" (optional)
     """
     try:
-        params: dict = {"q": query}
-        if fuzzy:
-            params["fuzzy"] = "true"
+        params: dict = {"q": query, "limit": limit}
+        params["mode"] = "fuzzy" if fuzzy and mode == "auto" else mode
+        if rerank:
+            params["rerank"] = "true"
         if since:
             params["since"] = since
         if before:
             params["before"] = before
+        if path:
+            params["path"] = path
 
         response = api_client.get(f"{OBSIDIAN_API_URL}/search", params=params)
         response.raise_for_status()
@@ -370,26 +400,38 @@ def search_vault(query: str, fuzzy: bool = False, since: str = "", before: str =
         results = data.get("results", [])
 
         if not results:
-            return f"No results found for: {query}"
+            return f"No results found for: {query} (mode: {data.get('mode', mode)})"
 
-        header = f"Found {len(results)} results for '{query}'"
-        if fuzzy:
-            header += " (fuzzy)"
+        header = f"Found {len(results)} results for '{query}' [mode: {data.get('mode', mode)}"
+        rerank_info = data.get("rerank")
+        if rerank_info and rerank_info.get("reranked"):
+            header += f", reranked by {rerank_info.get('model')}"
+        header += "]"
+
         date_parts = []
         if since:
             date_parts.append(f"since {since}")
         if before:
             date_parts.append(f"before {before}")
+        if path:
+            date_parts.append(f"in {path}")
         if date_parts:
-            header += f" [{', '.join(date_parts)}]"
+            header += f" ({', '.join(date_parts)})"
         output = header + ":\n"
 
-        for result in results[:20]:
+        # Surface degraded modes: a silent fallback to keyword search looks like
+        # a bad semantic index rather than a missing one.
+        for warning in data.get("warnings", []) or []:
+            output += f"  ! {warning}\n"
+
+        for result in results:
             line = f"\n  {result['file']}"
             if result.get("title") and result["title"] != result["file"].rsplit("/", 1)[-1].replace(".md", ""):
                 line += f" — {result['title']}"
             if result.get("date"):
                 line += f" [{result['date']}]"
+            if result.get("heading"):
+                line += f" § {result['heading']}"
             if result.get("score") is not None:
                 line += f" (score: {result['score']})"
             output += line + "\n"
@@ -1318,6 +1360,22 @@ def get_sync_status() -> str:
         last_error = indexer.get("last_error")
         if last_error:
             lines.append(f"Last index error: {last_error.get('message')} at {last_error.get('at')}")
+
+        # Search-index health: semantic search degrades to keyword silently when
+        # the embedding provider is down or the backfill has not finished.
+        search = data.get("search") or {}
+        if search:
+            lines.append("")
+            if search.get("error"):
+                lines.append(f"Search index: error — {search['error']}")
+            else:
+                state = "ready" if search.get("semantic_ready") else "keyword only"
+                lines.append(f"Search index: {search.get('chunks')} chunks, "
+                             f"{search.get('embedded')} embedded, {search.get('pending')} pending — semantic {state}")
+                lines.append(f"  Embeddings: {search.get('embed_provider')}/{search.get('embed_model')}"
+                             f" · rerank {'available' if search.get('rerank_available') else 'not configured'}")
+                if search.get("embed_error"):
+                    lines.append(f"  Embedding error: {search['embed_error']}")
 
         return "\n".join(lines)
     except Exception as e:

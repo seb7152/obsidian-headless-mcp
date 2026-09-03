@@ -30,7 +30,10 @@ REST API wrapping vault file operations. All endpoints require `Authorization: B
 ### 4. **Vault Indexer** (Node.js)
 Embedded SQLite index kept in sync with the vault via a file watcher. Indexes frontmatter, tags, and tasks from every `.md` file. Queried via `POST /api/query`. The same watcher drives **webhooks**, POSTing to external URLs when files change (see [Webhooks](#webhooks)).
 
-### 5. **MCP Server** (Python)
+### 5. **Hybrid Search Index** (Node.js)
+Lives in the same SQLite file as the vault index. Every note is split into chunks and indexed twice: **BM25** through SQLite's FTS5, and **semantically** as a vector embedding. A query hits both and the two rankings are fused, so a note is found whether you remember its wording or only its meaning. An optional cloud **reranker** can reorder the top candidates. See [Hybrid search](#hybrid-search).
+
+### 6. **MCP Server** (Python)
 Model Context Protocol server exposing the vault as tools and resources to AI models. Exposed at `https://mcp.DOMAIN`.
 
 ## Prerequisites
@@ -317,24 +320,54 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/search` | Search vault content |
+| `GET` | `/api/search` | Search vault content (hybrid by default) |
+| `GET` | `/api/search/status` | Chunk counts, embedding progress, provider health |
+| `POST` | `/api/search/reindex` | Kick the background embedding worker |
 
 Query parameters:
 - `q` (required) — search term
-- `fuzzy=true` — fuzzy title matching with scoring (default: exact keyword match via grep)
-- `since=YYYY-MM-DD` — filter by creation date
-- `before=YYYY-MM-DD` — filter by creation date
+- `mode` — `auto` (default) · `hybrid` · `semantic` · `bm25` · `grep` · `fuzzy`
+- `rerank=true` — reorder candidates with the cloud reranker (off by default)
+- `limit` — max notes returned (default 20, max 100)
+- `path` — restrict to a vault folder prefix, e.g. `20_Projects`
+- `since=YYYY-MM-DD` / `before=YYYY-MM-DD` — filter by note date
+- `fuzzy=true` — legacy alias for `mode=fuzzy`
+
+Which mode to use:
+
+| Mode | What it does | Reach for it when |
+|------|--------------|-------------------|
+| `auto` | Hybrid if the semantic index is ready, else `bm25` | Almost always |
+| `hybrid` | BM25 + vector, fused with RRF | Best general recall |
+| `semantic` | Vector only | The query's wording won't appear in the notes |
+| `bm25` | Ranked full-text only | Names, acronyms, jargon |
+| `grep` | Literal substring, unranked | An exact string: an ID, a URL, a snippet |
+| `fuzzy` | Title similarity | A half-remembered note name |
 
 ```bash
-# Keyword search
+# Default: hybrid
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://obsidian-api.yourdomain.com/api/search?q=meeting+notes&since=2025-01-01"
+  "https://obsidian-api.yourdomain.com/api/search?q=migration+du+serveur&since=2026-01-01"
+# → {"query":"...","mode":"hybrid","results":[{"file":"...","title":"...","heading":"Bascule",
+#     "matches":["..."],"date":"2026-03-10","score":0.0328,
+#     "chunks":[{"heading":"Bascule","start_line":4,"end_line":18}]}],"count":3,"warnings":[]}
 
-# Fuzzy search
+# Meaning only — finds "migration serveur" from "changement d'hébergeur"
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://obsidian-api.yourdomain.com/api/search?q=meting+nots&fuzzy=true"
-# → {"query":"...","results":[{"file":"...","title":"...","matches":["..."],"date":"2025-03-10","score":0.82}],"count":3,"fuzzy":true}
+  "https://obsidian-api.yourdomain.com/api/search?q=changement+d'hebergeur&mode=semantic"
+
+# Hard query: pay for a reranking pass
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/search?q=...&rerank=true"
+
+# Exact string
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://obsidian-api.yourdomain.com/api/search?q=INC-4471&mode=grep"
 ```
+
+`warnings` is not decoration: it is how a degraded answer announces itself
+(`"semantic index not ready — answered with BM25 only"`). An empty `warnings`
+array means the mode you asked for is the mode you got.
 
 ### SQL Query
 
@@ -436,12 +469,19 @@ curl -H "Authorization: Bearer $TOKEN" \
 #       "in_sync": true,
 #       "last_event": {"type": "change", "path": "notes/a.md", "at": "2026-08-03T21:10:00.000Z"},
 #       "last_error": null
+#     },
+#     "search": {
+#       "chunks": 5120, "embedded": 5120, "pending": 0,
+#       "semantic_ready": true,
+#       "embed_provider": "local", "embed_model": "Xenova/multilingual-e5-small",
+#       "embed_error": null, "rerank_available": true
 #     }
 #   }
 ```
 
 - `watcher_closed: true` or a persistently old `last_event.at` while files keep changing on disk is a strong signal the watcher died and needs a restart.
 - `in_sync: false` means the indexed file count doesn't match the vault's actual `.md` file count — a full reindex (restart the service) will resync it.
+- `search.semantic_ready: false` with a non-zero `search.pending` means the embedding backfill is still running; searches answer with BM25 in the meantime. A non-null `search.embed_error` means it is stuck, not slow.
 
 ### API tokens
 
@@ -692,7 +732,7 @@ tools on top of that. `obsidian:access` lets an identity work in the vault;
 | `delete_folders(folder_paths, hard=False)` | Delete one or more folders (up to 100), recursively — soft by default (moved to `.trash/`, recoverable); `hard=True` deletes permanently |
 | `move_folders(moves)` | Move or rename one or more folders (up to 100); each entry is its own `{"from": ..., "to": ...}` dict — missing destination parent folders are created automatically |
 | `list_directory(dir_path)` | List files and subdirectories; leave `dir_path` empty for vault root |
-| `search_vault(query, fuzzy, since, before)` | Search vault — keyword (default) or fuzzy with date filters |
+| `search_vault(query, mode, rerank, limit, fuzzy, since, before, path)` | Search vault — hybrid by default (`mode`: `auto`/`hybrid`/`semantic`/`bm25`/`grep`/`fuzzy`), optional cloud reranking, date and folder filters |
 | `get_projects()` | List project folders under `20_Projects/Pro/` |
 
 #### SQL & Index
@@ -789,6 +829,20 @@ and URL-path token paths are removed from the MCP server.
 
 ---
 
+### Search returns nothing, or only keyword-quality results
+
+Check `GET /api/search/status` (or `get_sync_status` from MCP) first — it says
+which half of the index is actually working.
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `chunks: 0` | The chunk backfill never ran | Restart `obsidian-api`; `reconcile()` chunks every note missing from the index on boot |
+| `pending` stuck > 0, `embed_error` set | An API-key provider (`jina`/`openai`/`voyage`) has no key, or `EMBED_PROVIDER=local` hit a transient failure (e.g. the HuggingFace download) | A missing/wrong key needs the env var fixed **and the container recreated** — Docker never re-reads `.env` into a running container. A transient `local`-provider failure just needs `POST /api/search/reindex` |
+| `pending` slowly decreasing | Backfill in progress (10–20 min for ~2k notes on CPU) | Wait; searches answer with BM25 meanwhile |
+| `semantic_ready: false`, no error | `EMBED_PROVIDER=none`, or `@huggingface/transformers` missing from the install | Set a provider and make sure the package is in the container's `npm install` |
+| `warnings: ["rerank: ..."]` | Reranker call failed | Results are still the hybrid ones; check `JINA_API_KEY` |
+| Results look stale | Watcher died — see above | Restart the service |
+
 ## Security Notes
 
 - Keep `.env` secure — never commit it to Git
@@ -815,13 +869,136 @@ and URL-path token paths are removed from the MCP server.
 
 ---
 
+## Hybrid search
+
+Search is chunked, ranked, and hybrid: every note is split into ~2200-character
+sections and each chunk is indexed twice — lexically (BM25 via FTS5) and
+semantically (a vector embedding). A query runs against both and the two
+rankings are fused.
+
+### Why both halves
+
+Neither retriever alone is enough on a real vault:
+
+- BM25 finds `INC-4471`, `Nokia`, `WALB` — exact tokens a vector model blurs.
+  It cannot find a note that says *migration serveur* when you searched for
+  *changement d'hébergeur*.
+- The vector half finds exactly that, and fails on rare identifiers it never
+  saw in training.
+
+They are fused with **Reciprocal Rank Fusion** (`score = Σ 1/(60 + rank)`).
+Rank-based fusion is the point: BM25 scores and cosine similarities live on
+different scales, and RRF needs no per-corpus calibration to combine them.
+
+### The pipeline
+
+```
+query
+  ├─ FTS5 BM25          ─┐
+  │   (diacritic-folded, │
+  │    prefix variants)  ├─ RRF fusion ─→ top 40 chunks ─→ [rerank] ─→ group by note
+  └─ vector search      ─┘
+      (cosine over the
+       in-memory matrix)
+```
+
+Notes on each stage:
+
+- **Chunking** splits on markdown headings, merges consecutive small sections,
+  and splits oversized ones at paragraph boundaries with a 300-character
+  overlap. Headings inside fenced code blocks are not treated as headings.
+- **BM25** uses the `unicode61 remove_diacritics 2` tokenizer, so `reunion`
+  matches `réunion`. FTS5 has no French stemmer, so tokens of 4+ characters
+  also get a prefix variant — that is what makes `réunion` match `réunions`.
+  Column weights favour a hit in the note title or section heading.
+- **Vector search** is a brute-force scan over an in-memory `Float32Array`.
+  At this vault's scale (~2k notes → ~5k chunks → ~8 MB) a full scan is a few
+  milliseconds; an ANN index would add a native dependency for no gain. Revisit
+  past ~100k chunks.
+- **Embedding** happens in a background worker, in batches, after indexing.
+  Chunks are content-hashed, so an unchanged section keeps its vector when the
+  note around it is edited, and a moved or renamed note is never re-embedded.
+
+### Embedding provider
+
+`EMBED_PROVIDER=local` (the default) runs `multilingual-e5-small` on CPU
+through transformers.js. Measured on 4 vCPU: **~100 ms per chunk** to index,
+**~4 ms** to embed a query, and **~1 GB RSS** once the model is loaded. A
+~2000-note vault backfills in roughly 10–20 minutes, once.
+
+That gigabyte is the real cost of keeping everything local. If it is too much
+for the box, `EMBED_PROVIDER=jina|openai|voyage` embeds through an API instead:
+near-zero RAM, a few cents to index the whole vault at $0.02/M tokens — at the
+price of sending note text to that provider. `EMBED_PROVIDER=none` disables the
+semantic half; search still works, ranked, on BM25 alone.
+
+Switching embedding model or provider invalidates the vectors. Clear them and
+let the worker rebuild:
+
+```bash
+sqlite3 /data/vault-index.db "UPDATE chunks SET embedding = NULL, embed_model = NULL;"
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  https://obsidian-api.yourdomain.com/api/search/reindex
+```
+
+### Reranking (optional)
+
+A cross-encoder reranker reorders the top candidates and is the single largest
+quality win available — but it is **off by default** and needs two things to
+fire: an API key, and `rerank=true` on the request.
+
+Local reranking is deliberately not supported. A 0.6B cross-encoder on a 2 vCPU
+VPS costs *minutes* per query; the hosted call costs a few hundred milliseconds
+and ~$0.0003 per search (Jina/Voyage, ~16k tokens at $0.02/M — roughly $1/month
+at 100 searches a day).
+
+The privacy trade-off is sharper than for embeddings, and worth being explicit
+about: embedding a query sends ~5 words to the provider, while **reranking
+sends the full text of every candidate passage**. `RERANK_EXCLUDE_PATHS` holds
+back whole folders — their chunks are never put in the payload and keep their
+pre-rerank position:
+
+```bash
+RERANK_EXCLUDE_PATHS=10_Context/perso,50_Archives/prive
+```
+
+A reranker outage degrades to the fused hybrid order and reports itself in
+`warnings`; it never empties a result page.
+
+### Tuning
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `SEARCH_CHUNK_MAX_CHARS` | `2200` | Chunk size ceiling (~550 tokens) |
+| `SEARCH_CHUNK_OVERLAP_CHARS` | `300` | Overlap carried across a split |
+| `SEARCH_CANDIDATE_LIMIT` | `40` | Chunks kept after fusion (and sent to the reranker) |
+| `SEARCH_RRF_K` | `60` | RRF constant; lower favours top ranks more sharply |
+| `EMBED_BATCH_SIZE` | `8` local / `64` remote | Chunks per embedding call — lower this if a remote provider's per-minute token limit gets tripped often |
+| `EMBED_WORKER_BATCH` | `32` | Chunks pulled from the DB per worker pass |
+| `EMBED_RETRY_MAX_ATTEMPTS` | `5` | Retries for a single batch on 429/5xx before giving up until the next scheduled pass |
+| `EMBED_RETRY_BASE_MS` / `EMBED_RETRY_MAX_MS` | `5000` / `60000` | Backoff between retries (a provider's own `Retry-After` header wins when present) |
+
 ## Files Reference
 
 ### `obsidian-api.js`
-Express REST API server. Handles file reads/writes, frontmatter parsing (js-yaml), search (grep + fuzzy), directory listing, wikilink resolution, and SQL queries via the vault indexer.
+Express REST API server. Handles file reads/writes, frontmatter parsing (js-yaml), search (hybrid, plus legacy grep/fuzzy modes), directory listing, wikilink resolution, and SQL queries via the vault indexer.
 
 ### `vault-indexer.js`
 SQLite indexer (better-sqlite3). Bootstraps a full index on first start, then keeps it live via a chokidar file watcher. Indexes frontmatter, tags, and tasks from every `.md` file. Each `add`/`change`/`unlink` also fans out to the webhook dispatcher.
+
+### `search-index.js`
+Hybrid search: markdown chunking, the FTS5/BM25 index, the vector index and its
+brute-force cosine scan, RRF fusion, and the background embedding worker. Shares
+the indexer's SQLite handle rather than opening its own.
+
+### `embeddings.js`
+Embedding providers behind one interface — `local` (transformers.js on CPU),
+`jina`, `openai`, `voyage`, `none`. Always returns L2-normalised vectors, and
+never throws fatally: an unavailable provider degrades search to BM25.
+
+### `rerank.js`
+Optional cloud reranking of search candidates (Jina, Cohere, Voyage), with the
+`RERANK_EXCLUDE_PATHS` guard and a failure path that preserves the hybrid order.
 
 ### `webhooks.js`
 Webhook configuration, matching, and delivery. Persists webhooks to `/data/webhooks.json` (atomic writes), filters changes by folder glob and frontmatter subset, and POSTs signed payloads with bounded concurrency, timeouts, retries, and SSRF protection. Created/managed via the REST API; listed read-only via MCP.

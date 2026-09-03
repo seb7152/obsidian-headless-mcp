@@ -50,7 +50,7 @@ services:
       - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
       - sqlite-data:/data
-    command: bash -c "rm -rf /tmp/repo && mkdir -p /tmp/app && git clone https://github.com/seb7152/obsidian-headless-mcp.git /tmp/repo && cat /tmp/repo/obsidian-api.js > /tmp/app/server.js && cat /tmp/repo/vault-indexer.js > /tmp/app/vault-indexer.js && cat /tmp/repo/webhooks.js > /tmp/app/webhooks.js && cat /tmp/repo/tokens.js > /tmp/app/tokens.js && npm install express cors js-yaml better-sqlite3 chokidar && node server.js"
+    command: bash -c "set -e; mkdir -p /tmp/app && for f in obsidian-api.js vault-indexer.js webhooks.js tokens.js search-index.js embeddings.js rerank.js; do curl -fsSL https://raw.githubusercontent.com/seb7152/obsidian-headless-mcp/main/$$f -o /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
     expose:
       - "3000"
     environment:
@@ -70,6 +70,25 @@ services:
       # live indexing and webhooks fire on file changes. Tune the interval as needed.
       - CHOKIDAR_USEPOLLING=true
       - CHOKIDAR_INTERVAL=1000
+      # -- Hybrid search --------------------------------------------------
+      # Semantic half of the search index. `local` runs a small multilingual
+      # encoder on CPU (no data leaves the box, ~1 GB RSS once loaded).
+      # Set to `jina`/`openai`/`voyage` to embed through an API instead —
+      # cheaper in RAM, but the note text is sent to that provider.
+      # `none` disables semantic search: the API falls back to BM25.
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-local}
+      - EMBED_MODEL=${EMBED_MODEL:-Xenova/multilingual-e5-small}
+      # Model weights land on the sqlite-data volume so a restart does not
+      # re-download ~120 MB from HuggingFace.
+      - TRANSFORMERS_CACHE=/data/models
+      - EMBED_BATCH_SIZE=${EMBED_BATCH_SIZE:-8}
+      # Optional cloud reranker (off unless a key is set AND the caller passes
+      # rerank=true). Reranking sends the matching passages to the provider,
+      # so keep sensitive folders out with RERANK_EXCLUDE_PATHS.
+      - RERANK_PROVIDER=${RERANK_PROVIDER:-jina}
+      - RERANK_MODEL=${RERANK_MODEL:-jina-reranker-v2-base-multilingual}
+      - RERANK_EXCLUDE_PATHS=${RERANK_EXCLUDE_PATHS:-}
+      - JINA_API_KEY=${JINA_API_KEY:-}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.obsidian-api.rule=Host(`obsidian-api.${DOMAIN}`)"
