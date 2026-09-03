@@ -511,7 +511,12 @@ explicitly create with it have.
 | `expires_at` | `YYYY-MM-DD` | After this date the token stops authenticating. Optional, but set one for anything living on a machine you don't fully control. |
 
 Prefixes match on whole path segments, so `10_Context/Perso` covers
-`10_Context/Perso/profil.md` but never `10_Context/Perso2/`.
+`10_Context/Perso/profil.md` but never `10_Context/Perso2/`. Paths are
+canonicalised before the comparison — `.` and `..` are resolved, and a path
+climbing above the vault root or carrying a backslash is refused outright, so a
+prefix cannot be walked around with `20_Projects/Pro/../../10_Context/Perso/`.
+A prefix that cannot be canonicalised is rejected when the token is created,
+rather than silently dropped.
 
 ```bash
 # A read-only token for a machine that should never see the personal zone
@@ -541,6 +546,11 @@ curl -X DELETE -H "Authorization: Bearer $API_TOKEN" \
 - Endpoints taking paths in the body (`/api/files/batch`, `/api/files/move`,
   `/api/folders`, `/api/folders/move`) reject the **whole** request if any path
   is out of scope, rather than silently doing part of the work.
+- Operations that carry a whole subtree — deleting or moving a folder — need
+  that subtree to be in scope, not merely reachable: a token allowed only
+  `20_Projects/Pro/Sub` may browse down through `20_Projects/Pro`, but may not
+  delete or move it, and may not take the parent of one of its own `path_deny`
+  prefixes either.
 - Listing endpoints (`/api/files`, `/api/search`, `/api/directory`,
   `/api/projects`) filter results silently, so a restricted token cannot probe
   for the existence of files it may not read. A directory that merely leads to
