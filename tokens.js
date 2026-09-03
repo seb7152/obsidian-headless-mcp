@@ -61,6 +61,18 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// True only for a date that exists. The shape alone is not enough: expiry is
+// compared lexicographically against today(), so an impossible date like
+// "9999-99-99" or a typo like "2026-13-01" sorts after every real one and the
+// token never expires — bounded on paper, permanent in practice.
+function isRealDate(s) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
+  if (!m) return false;
+  const [y, mo, d] = m.slice(1).map(Number);
+  const dt = new Date(Date.UTC(y, mo - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
+}
+
 // Canonicalise a vault-relative path for prefix comparison: "." and ".."
 // segments resolved, leading/trailing/duplicate "/" dropped.
 //
@@ -171,8 +183,8 @@ function create({ name, scopes, path_allow, path_deny, expires_at }) {
   }
 
   if (expires_at !== undefined && expires_at !== null) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(expires_at)) {
-      throw Object.assign(new Error('"expires_at" must be YYYY-MM-DD'), { status: 400 });
+    if (!isRealDate(expires_at)) {
+      throw Object.assign(new Error('"expires_at" must be a real calendar date, YYYY-MM-DD'), { status: 400 });
     }
     if (expires_at < today()) {
       throw Object.assign(new Error('"expires_at" is in the past'), { status: 400 });

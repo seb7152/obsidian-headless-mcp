@@ -267,6 +267,25 @@ test('a created token authenticates, carrying its scopes and paths', () => {
   assert.equal(tokens.canAccessFile(auth, '20_Projects/Pro/Interne/a.md'), false);
 });
 
+test('an impossible expiry date is refused', () => {
+  // The shape alone is not enough: expiry is compared lexicographically, so
+  // "9999-99-99" sorts after every real date and the token never expires.
+  for (const bad of ['9999-99-99', '2026-13-01', '2027-02-30', '2027-00-10']) {
+    assert.throws(
+      () => tokens.create({ name: 'bad expiry', expires_at: bad }),
+      /real calendar date/,
+      `expected ${bad} to be refused`
+    );
+  }
+
+  // A real leap day is accepted; the same day in a non-leap year is not.
+  assert.ok(tokens.create({ name: 'leap', expires_at: '2028-02-29' }).id);
+  assert.throws(
+    () => tokens.create({ name: 'not a leap year', expires_at: '2027-02-29' }),
+    /real calendar date/
+  );
+});
+
 test('revocation takes effect immediately and keeps the audit trail', () => {
   const created = tokens.create({ name: 'to revoke', scopes: ['read'] });
   assert.ok(tokens.authenticate(created.token, '10.0.0.1'));

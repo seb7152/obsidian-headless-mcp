@@ -508,7 +508,7 @@ explicitly create with it have.
 | `scopes` | string[] | `read`, `write`, `admin`. Default `["read"]`. `write` implies `read`; `admin` implies both. |
 | `path_allow` | string[] | Vault-relative prefixes this token may reach. Empty = whole vault. |
 | `path_deny` | string[] | Prefixes it may never reach. **Deny always wins over allow.** |
-| `expires_at` | `YYYY-MM-DD` | After this date the token stops authenticating. Optional, but set one for anything living on a machine you don't fully control. |
+| `expires_at` | `YYYY-MM-DD` | After this date the token stops authenticating. Must be a real calendar date — an impossible one would sort after every real date and never expire. Optional, but set one for anything living on a machine you don't fully control. |
 
 Prefixes match on whole path segments, so `10_Context/Perso` covers
 `10_Context/Perso/profil.md` but never `10_Context/Perso2/`. Paths are
