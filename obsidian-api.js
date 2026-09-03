@@ -1391,6 +1391,40 @@ app.post('/api/tokens', (req, res) => {
   }
 });
 
+// Resolve a token to its principal, for the MCP server.
+//
+// The MCP container mounts no volume, so it cannot read the token file itself —
+// and reimplementing hashing, expiry and revocation in Python would be a second
+// implementation to keep in step with this one. It asks here instead, with the
+// root token, and caches the answer briefly.
+//
+// Admin-scoped like the rest of /api/tokens. Returns metadata only: the secret
+// is never echoed back, and an unknown token yields `valid: false` rather than
+// anything that would distinguish "wrong" from "revoked" to a caller that
+// somehow reached this endpoint without admin.
+app.post('/api/tokens/verify', (req, res) => {
+  const { token } = req.body || {};
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: '"token" is required' });
+  }
+
+  // Note: this records last_used against the MCP container's IP, not the real
+  // client's — the MCP server is the one making the call.
+  const auth = tokens.authenticate(token, req.ip);
+  if (!auth) return res.status(200).json({ valid: false });
+
+  res.json({
+    valid: true,
+    id: auth.id,
+    name: auth.name,
+    scopes: auth.scopes,
+    path_allow: auth.path_allow,
+    path_deny: auth.path_deny,
+    root: Boolean(auth.root),
+    path_restricted: tokens.isPathRestricted(auth)
+  });
+});
+
 // Revoke a token — takes effect on the next request, no restart needed.
 // The record is kept so the audit trail survives.
 app.delete('/api/tokens/:id', (req, res) => {

@@ -138,6 +138,49 @@ async def main():
     r, st = await call(None, headers={"authorization": "Bearer bad"}, body=tools_call("read_file"))
     check("an invalid OAuth token is refused (401)", r["app"] is False and st == 401)
 
+    print("\nStore tokens")
+    original_verify = m._verify_api_token
+
+    def store(**principal):
+        base = {"valid": True, "name": "t", "scopes": ["write"],
+                "path_allow": [], "path_deny": [], "root": False, "path_restricted": False}
+        base.update(principal)
+
+        async def _verify(token):
+            return base if token == "obsv_known" else None
+        return _verify
+
+    m._verify_api_token = store()
+    r, st = await call(None, headers={"authorization": "Bearer obsv_known"}, body=tools_call("read_file"))
+    check("an unrestricted write token is accepted", r["app"] is True)
+
+    m._verify_api_token = store(path_restricted=True, path_allow=["20_Projects/Pro"])
+    r, st = await call(None, headers={"authorization": "Bearer obsv_known"}, body=tools_call("read_file"))
+    check("a PATH-RESTRICTED token is refused (403), not silently run as root",
+          r["app"] is False and st == 403)
+
+    m._verify_api_token = store(scopes=["read"])
+    r, st = await call(None, headers={"authorization": "Bearer obsv_known"}, body=tools_call("read_file"))
+    check("a READ-ONLY token is refused (403), not silently run as root",
+          r["app"] is False and st == 403)
+
+    m._verify_api_token = store()
+    r, st = await call(None, headers={"authorization": "Bearer obsv_known"},
+                       body=tools_call("create_api_token"))
+    check("a write token alone CANNOT manage tokens (403)", r["app"] is False and st == 403)
+
+    m._verify_api_token = store(scopes=["write", "admin"])
+    r, st = await call(None, headers={"authorization": "Bearer obsv_known"},
+                       body=tools_call("create_api_token"))
+    check("an admin-scoped token may manage tokens", r["app"] is True)
+
+    # An unknown token must fall through to OAuth rather than being accepted.
+    m._verify_api_token = store()
+    m._fetch_userinfo = _reject
+    r, st = await call(None, headers={"authorization": "Bearer obsv_unknown"}, body=tools_call("read_file"))
+    check("an unknown token falls through to OAuth and 401s", r["app"] is False and st == 401)
+
+    m._verify_api_token = original_verify
     m._fetch_userinfo = original
 
     print(f"\n{len(PASSED)} passed, {len(FAILED)} failed")

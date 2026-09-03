@@ -495,6 +495,7 @@ its own without disturbing anything else.
 | `GET` | `/api/tokens/{id}` | Get one token |
 | `POST` | `/api/tokens` | Create a token — the plaintext is in this response and nowhere else |
 | `DELETE` | `/api/tokens/{id}` | Revoke, effective on the next request |
+| `POST` | `/api/tokens/verify` | Resolve a token to its principal — used by the MCP server |
 
 All four need the `admin` scope, which only `API_TOKEN` and tokens you
 explicitly create with it have.
@@ -643,8 +644,20 @@ Exposes the vault as MCP tools and resources for AI agents. Base URL: `https://m
 
 Two methods are supported, checked in this order:
 
-**1. Authorization header with the static token (recommended for Claude Code CLI / Codex CLI —
-simpler than OAuth for those clients)**
+**1. Authorization header — the env `API_TOKEN`, or any named token from the store
+(recommended for Claude Code CLI / Codex CLI — simpler than OAuth for those clients)**
+
+Prefer a named token over the shared `API_TOKEN`: one per client means you can
+revoke the laptop's without touching n8n's, and `last_used_at` tells you whether
+a key is still in use before you kill it.
+
+> **MCP takes only unrestricted tokens.** This server calls the REST API with the
+> root `API_TOKEN`, so a token's scopes and paths are *not* enforced on what you
+> do through MCP. A path-restricted or read-only token is therefore **refused**
+> with a `403` explaining why, rather than quietly running as root. Use such
+> tokens against the REST API directly, where they are enforced. Scoping over
+> MCP would require forwarding the caller's credential per request — separate
+> work, not done here.
 ```json
 {
   "mcpServers": {

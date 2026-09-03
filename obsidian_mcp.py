@@ -1514,12 +1514,94 @@ async def _fetch_userinfo(token: str) -> dict | None:
     return userinfo
 
 
+_TOKEN_CACHE_TTL = 45  # seconds — same reasoning as the userinfo cache above
+_token_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+async def _verify_api_token(token: str) -> dict | None:
+    """Resolve a token against the REST token store, or None if it isn't one.
+
+    This container mounts no volume, so it cannot read the token file; and
+    reimplementing hashing, expiry and revocation here would be a second copy to
+    keep in step with tokens.js. It asks the API instead, with the root token,
+    and caches the answer briefly — keyed by a hash, never the token itself.
+
+    A revoked token therefore keeps working for at most _TOKEN_CACHE_TTL
+    seconds. That is the same window the OAuth path already accepts, and the
+    alternative is a round trip on every single MCP call.
+    """
+    import hashlib
+    import time
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    cached = _token_cache.get(token_hash)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    principal = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{OBSIDIAN_API_URL}/tokens/verify",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+                json={"token": token},
+            )
+        if response.status_code == 200:
+            body = response.json()
+            if body.get("valid"):
+                principal = body
+    except httpx.HTTPError:
+        principal = None
+
+    _token_cache[token_hash] = (now + _TOKEN_CACHE_TTL, principal)
+    return principal
+
+
 def _protected_resource_metadata_url() -> str:
     return f"{MCP_PUBLIC_URL.rstrip('/')}/.well-known/oauth-protected-resource"
 
 
-# Tools that manage API credentials. Gated on OAUTH_ADMIN_ROLE for OAuth callers.
+# Tools that manage API credentials. Gated on OAUTH_ADMIN_ROLE for OAuth callers,
+# and on the `admin` scope for tokens from the store.
 ADMIN_TOOLS = {"create_api_token", "list_api_tokens", "revoke_api_token"}
+
+
+def _mcp_token_refusal(principal: dict) -> str | None:
+    """Why this store token may not be used against MCP, or None if it may.
+
+    This server calls the REST API with the root API_TOKEN, so a token's scopes
+    and path restrictions are NOT enforced on the operations it triggers here.
+    Accepting a restricted token would therefore authenticate it without
+    honouring its limits — worse than refusing it, because it would look
+    contained while being root in practice.
+
+    So MCP takes only tokens that are already equivalent to root: unrestricted
+    by path, and carrying write. What they buy over the env API_TOKEN is a name,
+    an expiry, a last-used trail, and revocation one client at a time.
+
+    Path scoping over MCP needs the caller's credential to be forwarded to the
+    REST API per request, which is a separate piece of work.
+    """
+    if principal.get("root"):
+        return None
+
+    if principal.get("path_restricted"):
+        return (
+            "path-restricted tokens are refused here: MCP calls the REST API as root, "
+            "so path_allow/path_deny would not be enforced on what you do through it. "
+            "Use this token against the REST API directly, where scoping is enforced."
+        )
+
+    scopes = principal.get("scopes") or []
+    if "write" not in scopes and "admin" not in scopes:
+        return (
+            "read-only tokens are refused here: MCP calls the REST API as root, so the "
+            "read-only limit would not be enforced on what you do through it. "
+            "Use this token against the REST API directly, where scopes are enforced."
+        )
+
+    return None
 
 
 async def _buffered_receive(receive):
@@ -1579,7 +1661,7 @@ def _admin_tools_called(body: bytes) -> set:
 
 
 class AuthMiddleware:
-    """Accepts two authentication schemes, checked in this order:
+    """Accepts three credentials, checked in this order:
 
     1. Static token, as `Authorization: Bearer <API_TOKEN>` (kept for continuity —
        Claude Code CLI / Codex CLI use this today, and it's simpler for them than
@@ -1592,7 +1674,16 @@ class AuthMiddleware:
        that chain. Clients configured that way must move the token to the
        Authorization header.
 
-    2. OAuth 2.1 resource-server flow (MCP spec, revisions 2025-06 / 2025-11), used by
+    2. A named token from the store (tokens.js), resolved through
+       POST /api/tokens/verify and cached briefly. These exist so each client can
+       hold its own credential — named, expiring, individually revocable, with a
+       last-used trail — instead of everyone sharing the one env token.
+
+       Only tokens already equivalent to root are accepted here: unrestricted by
+       path, carrying write. See _mcp_token_refusal for why a restricted token is
+       refused rather than quietly run as root.
+
+    3. OAuth 2.1 resource-server flow (MCP spec, revisions 2025-06 / 2025-11), used by
        clients like claude.ai: any other bearer token is validated against Zitadel's
        /oidc/v1/userinfo endpoint. Zitadel is the authorization server; this server
        never handles login, it only validates the token presented on each request.
@@ -1639,17 +1730,25 @@ class AuthMiddleware:
         )
 
         if header_matches_static:
-            scope = dict(scope)
-            new_headers = [(k, v) for k, v in headers if k.lower() != b"host"]
-            new_headers.append((b"host", b"localhost"))
-            scope["headers"] = new_headers
-            await self.app(scope, receive, send)
-            return
+            return await self._forward(scope, receive, send, headers, is_admin=True)
 
-        # -- 2. OAuth 2.1 (Zitadel) --
         if not bearer_token:
             await self._send_401(send, "invalid_request", "Missing bearer token")
             return
+
+        # -- 2. A named token from the store (revocable one at a time) --
+        principal = await _verify_api_token(bearer_token)
+        if principal is not None:
+            refusal = _mcp_token_refusal(principal)
+            if refusal:
+                await self._send_token_403(send, principal, refusal)
+                return
+            return await self._forward(
+                scope, receive, send, headers,
+                is_admin="admin" in (principal.get("scopes") or []),
+            )
+
+        # -- 3. OAuth 2.1 (Zitadel) --
 
         userinfo = await _fetch_userinfo(bearer_token)
         if userinfo is None:
@@ -1661,9 +1760,16 @@ class AuthMiddleware:
             await self._send_403(send)
             return
 
-        # Using the vault and managing the credentials that reach it are two
-        # different privileges: the second needs OAUTH_ADMIN_ROLE as well.
-        if scope.get("method") == "POST" and OAUTH_ADMIN_ROLE not in roles:
+        return await self._forward(
+            scope, receive, send, headers, is_admin=OAUTH_ADMIN_ROLE in roles
+        )
+
+    async def _forward(self, scope, receive, send, headers, *, is_admin):
+        """Hand the request to the app, gating the credential-management tools.
+
+        Every accepted credential funnels through here, so the admin gate cannot
+        be skipped by adding an authentication branch and forgetting it."""
+        if not is_admin and scope.get("method") == "POST":
             body, receive = await _buffered_receive(receive)
             requested = _admin_tools_called(body)
             if requested:
@@ -1709,6 +1815,20 @@ class AuthMiddleware:
         body = json.dumps({
             "error": "forbidden",
             "error_description": f"Missing required role: {OAUTH_REQUIRED_ROLE}",
+        }).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _send_token_403(self, send, principal, reason):
+        import json
+
+        body = json.dumps({
+            "error": "forbidden",
+            "error_description": f"Token \"{principal.get('name')}\": {reason}",
         }).encode()
         await send({
             "type": "http.response.start",
