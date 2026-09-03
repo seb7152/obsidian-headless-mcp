@@ -290,6 +290,28 @@ function canAccessPath(auth, relPath) {
   return allow.some(a => isUnder(rel, a) || isUnder(a, rel));
 }
 
+// Strictest variant, for an operation that carries a whole subtree with it —
+// deleting or moving a folder. Two extra conditions over canAccessFile:
+//
+//   - an ancestor of an allowed prefix is not enough. A token allowed only
+//     "20_Projects/Pro/Sub" must not delete "20_Projects/Pro": that takes every
+//     sibling with it, none of which the token may even read.
+//   - no denied prefix may live underneath the path, or the operation reaches
+//     denied content by taking its parent.
+function canAccessTree(auth, relPath) {
+  if (!auth) return false;
+  const rel = normalizeRel(relPath);
+  if (rel === null) return false;
+
+  for (const denied of auth.path_deny || []) {
+    if (isUnder(rel, denied) || isUnder(denied, rel)) return false;
+  }
+
+  const allow = auth.path_allow || [];
+  if (allow.length === 0) return true;
+  return allow.some(a => isUnder(rel, a));
+}
+
 // Stricter variant for reads and writes of an actual file: the path must sit
 // inside an allowed prefix, not merely be one of its ancestors.
 function canAccessFile(auth, relPath) {
@@ -316,6 +338,7 @@ module.exports = {
   isPathRestricted,
   canAccessPath,
   canAccessFile,
+  canAccessTree,
   normalizeRel,
   isUnder,
   SCOPES,

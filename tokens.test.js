@@ -177,6 +177,51 @@ test('a denied ancestor is not browsable either', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Recursive operations
+//
+// A folder delete or move takes everything under it. Authorizing one the way a
+// directory listing is authorized — where an ancestor of an allowed prefix is
+// deliberately tolerated so the token can navigate down to it — hands the token
+// every sibling it may not even read.
+// ---------------------------------------------------------------------------
+
+test('canAccessTree refuses an ancestor of the allowed prefix', () => {
+  const auth = { scopes: ['write'], path_allow: ['20_Projects/Pro/Sub'], path_deny: [] };
+
+  // The escalation this guards: the token cannot read 20_Projects/Pro/x.md,
+  // so it must not be able to delete the folder holding it.
+  assert.equal(tokens.canAccessFile(auth, '20_Projects/Pro/x.md'), false);
+  assert.equal(tokens.canAccessPath(auth, '20_Projects/Pro'), true); // browsable
+  assert.equal(tokens.canAccessTree(auth, '20_Projects/Pro'), false); // not deletable
+  assert.equal(tokens.canAccessTree(auth, '20_Projects'), false);
+
+  // Its own subtree stays fully operable.
+  assert.equal(tokens.canAccessTree(auth, '20_Projects/Pro/Sub'), true);
+  assert.equal(tokens.canAccessTree(auth, '20_Projects/Pro/Sub/Deeper'), true);
+});
+
+test('canAccessTree refuses a folder that contains a denied prefix', () => {
+  const auth = {
+    scopes: ['write'],
+    path_allow: ['20_Projects/Pro'],
+    path_deny: ['20_Projects/Pro/Interne']
+  };
+
+  // Moving or deleting the parent would take the denied folder with it.
+  assert.equal(tokens.canAccessTree(auth, '20_Projects/Pro'), false);
+  assert.equal(tokens.canAccessTree(auth, '20_Projects/Pro/Interne'), false);
+  assert.equal(tokens.canAccessTree(auth, '20_Projects/Pro/MEN'), true);
+});
+
+test('canAccessTree leaves an unrestricted token alone and refuses traversal', () => {
+  const root = { scopes: ['write'], path_allow: [], path_deny: [] };
+  assert.equal(tokens.canAccessTree(root, '20_Projects/Pro'), true);
+  assert.equal(tokens.canAccessTree(root, '../outside'), false);
+  // Dots that stay inside the vault are just a longhand path, not an escape.
+  assert.equal(tokens.canAccessTree(root, '20_Projects/Pro/../MEN'), true);
+});
+
+// ---------------------------------------------------------------------------
 // Scopes
 // ---------------------------------------------------------------------------
 

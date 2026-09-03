@@ -54,33 +54,55 @@ function decodePath(p) {
   }
 }
 
+// Which predicate a target path needs. Getting this wrong is how a token
+// escapes its scope sideways, so the distinction is explicit per target rather
+// than inferred from the shape of the value.
+//
+//   file   — a path that must itself be in scope: a note, a folder to create,
+//            a destination written into.
+//   tree   — an operation that carries a whole subtree with it (folder delete,
+//            folder move): the subtree must be wholly in scope.
+//   browse — read-only navigation, where a directory merely leading to an
+//            allowed prefix stays listable.
+const CHECKS = {
+  file: tokens.canAccessFile,
+  tree: tokens.canAccessTree,
+  browse: tokens.canAccessPath
+};
+
 // Collect every vault path a request targets, from the URL and from the body.
 function targetPaths(req) {
   const found = [];
   const urlPath = decodePath(req.path);
 
   let m = urlPath.match(FILE_ROUTE);
-  if (m) found.push({ path: m[1], field: 'path', file: true });
+  if (m) found.push({ path: m[1], field: 'path', check: 'file' });
 
+  // /api/directory is read-only, so an ancestor of an allowed prefix is a
+  // legitimate step on the way down to it.
   m = urlPath.match(DIR_ROUTE);
-  if (m && m[1]) found.push({ path: m[1], field: 'path', file: false });
+  if (m && m[1]) found.push({ path: m[1], field: 'path', check: 'browse' });
 
   const body = req.body || {};
   if (Array.isArray(body.paths)) {
     // /api/folders takes folder prefixes; the file endpoints take files.
+    // Deleting a folder takes everything under it, so that one needs the whole
+    // subtree in scope — creating one only needs the folder itself.
     const isFolder = urlPath.startsWith('/api/folders');
-    for (const p of body.paths) found.push({ path: p, field: 'paths', file: !isFolder });
+    const check = !isFolder ? 'file' : (req.method === 'DELETE' ? 'tree' : 'file');
+    for (const p of body.paths) found.push({ path: p, field: 'paths', check });
   }
   if (body.destination_folder) {
-    found.push({ path: body.destination_folder, field: 'destination_folder', file: false });
+    found.push({ path: body.destination_folder, field: 'destination_folder', check: 'file' });
   }
   if (body.destination) {
-    found.push({ path: body.destination, field: 'destination', file: true });
+    found.push({ path: body.destination, field: 'destination', check: 'file' });
   }
   if (Array.isArray(body.moves)) {
+    // A folder move relocates the subtree and everything under the target name.
     for (const mv of body.moves) {
-      if (mv && mv.from) found.push({ path: mv.from, field: 'moves.from', file: false });
-      if (mv && mv.to) found.push({ path: mv.to, field: 'moves.to', file: false });
+      if (mv && mv.from) found.push({ path: mv.from, field: 'moves.from', check: 'tree' });
+      if (mv && mv.to) found.push({ path: mv.to, field: 'moves.to', check: 'tree' });
     }
   }
 
@@ -126,7 +148,7 @@ app.use((req, res, next) => {
   }
 
   const denied = targetPaths(req)
-    .filter(t => !(t.file ? tokens.canAccessFile : tokens.canAccessPath)(req.auth, t.path))
+    .filter(t => !CHECKS[t.check](req.auth, t.path))
     .map(t => ({ field: t.field, path: t.path }));
 
   if (denied.length > 0) {
