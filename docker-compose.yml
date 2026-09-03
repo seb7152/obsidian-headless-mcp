@@ -91,6 +91,8 @@ services:
       - PORT=3001
       - VAULT_NAME=${VAULT_NAME}
       - MCP_PUBLIC_URL=https://mcp.${DOMAIN}
+      # Vault access vs credential management are separate privileges.
+      - OAUTH_ADMIN_ROLE=${OAUTH_ADMIN_ROLE:-obsidian:admin}
       - ZITADEL_ISSUER=${ZITADEL_ISSUER:-https://zitadel-k9z6.srv828065.hstgr.cloud}
       - OAUTH_REQUIRED_ROLE=${OAUTH_REQUIRED_ROLE:-obsidian:access}
     labels:

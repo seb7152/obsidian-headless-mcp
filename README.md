@@ -653,6 +653,10 @@ For OAuth requests, access is granted only to users holding the `obsidian:access
 in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (see
 [Security Notes](#security-notes)).
 
+A second role, **`obsidian:admin`** (`OAUTH_ADMIN_ROLE`), gates the API-token
+tools on top of that. `obsidian:access` lets an identity work in the vault;
+`obsidian:admin` lets it hand out and revoke credentials.
+
 ### Resources
 
 | URI | Description |
@@ -729,12 +733,27 @@ Read and write [Document Comments](https://github.com/kylemcd/obsidian-document-
 | Tool | Description |
 |------|-------------|
 | `list_api_tokens()` | List the scoped REST API tokens — name, scopes, path restrictions, expiry, last use. Secrets are never returned. |
+| `create_api_token(name, scopes, path_allow, path_deny, expires_at)` | Mint a token. The plaintext is in the response and nowhere else. |
 | `revoke_api_token(token_id)` | Revoke a token by id, effective on the next request. |
 
-Creation is deliberately absent: this server proxies to the REST API with the
-root `API_TOKEN`, so a `create` tool would let any MCP caller mint an
-unrestricted credential. Create tokens with `POST /api/tokens` instead. See
-[API tokens](#api-tokens).
+These three require the **`obsidian:admin`** role (`OAUTH_ADMIN_ROLE`) on top of
+`obsidian:access`. Using the vault and handing out credentials that reach it are
+separate privileges: an identity can be given one without the other, and the
+capability is withdrawn by removing the role in Zitadel — no redeploy, nothing
+else affected.
+
+The check runs in `AuthMiddleware`, which inspects the JSON-RPC body for a
+`tools/call` naming one of these tools and returns `403` before the request ever
+reaches the tool. It is deliberately not a contextvar set around the app call:
+under streamable HTTP a tool can execute in a task created before the current
+request, which would either lose the principal or — worse — inherit the previous
+request's.
+
+Callers presenting the static `API_TOKEN` pass this gate. That is not a
+loophole so much as an acknowledgement: `API_TOKEN` is already root on the REST
+API, so anyone holding it can `POST /api/tokens` directly. The role separation
+is meaningful **between OAuth identities**, and becomes airtight once the static
+and URL-path token paths are removed from the MCP server.
 
 ---
 
@@ -777,6 +796,13 @@ unrestricted credential. Create tokens with `POST /api/tokens` instead. See
 - Obsidian Sync provides end-to-end encryption for vault data at rest
 - Directory traversal is blocked server-side on all file endpoints
 - **Webhooks**: created only via the authenticated REST API (never from MCP); the config lives outside the synced vault (`/data/webhooks.json`); secrets are stored server-side and redacted in all API/MCP responses. SSRF is blocked by default — only public `https://` targets are allowed, redirects are not followed, and the destination is re-validated before every delivery. Loosen this only via `WEBHOOK_ALLOW_PRIVATE=true` for trusted internal receivers.
+- **MCP credential management**: `create_api_token` / `list_api_tokens` /
+  `revoke_api_token` require the `obsidian:admin` role, checked in the auth
+  middleware before the request reaches the tool. Note that the static
+  `API_TOKEN` also passes, since it is already root on the REST API and could
+  call `POST /api/tokens` directly — the separation bites between OAuth
+  identities, and becomes absolute once the static/URL-path token paths are
+  retired.
 - **MCP OAuth**: the MCP server (`mcp.DOMAIN`) also accepts OAuth 2.1 + PKCE via Zitadel
   alongside the static `API_TOKEN`. For OAuth requests, every bearer token is validated
   against Zitadel's `/oidc/v1/userinfo`, and access is denied (`403`) unless the token's
