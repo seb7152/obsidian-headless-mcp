@@ -50,7 +50,7 @@ services:
       - ./obsidian-api.js:/app/server.js
       - ./vault:/vault
       - sqlite-data:/data
-    command: bash -c "set -e; mkdir -p /tmp/app && for f in obsidian-api.js vault-indexer.js webhooks.js search-index.js embeddings.js rerank.js; do curl -fsSL https://raw.githubusercontent.com/seb7152/obsidian-headless-mcp/main/$$f -o /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
+    command: bash -c "set -e; mkdir -p /tmp/app && for f in obsidian-api.js vault-indexer.js webhooks.js tokens.js search-index.js embeddings.js rerank.js; do curl -fsSL https://raw.githubusercontent.com/seb7152/obsidian-headless-mcp/main/$$f -o /tmp/app/$$f; done && mv /tmp/app/obsidian-api.js /tmp/app/server.js && npm install express cors js-yaml better-sqlite3 chokidar @huggingface/transformers && node server.js"
     expose:
       - "3000"
     environment:
@@ -60,6 +60,8 @@ services:
       - API_TOKEN=${API_TOKEN}
       # Webhooks config persists on the sqlite-data volume (NOT synced to Obsidian devices).
       - WEBHOOKS_CONFIG_PATH=/data/webhooks.json
+      # Scoped API tokens live alongside it — same volume, same reason: never in the vault.
+      - TOKENS_CONFIG_PATH=/data/tokens.json
       # Strict SSRF protection by default; set to true only to allow private/internal targets.
       - WEBHOOK_ALLOW_PRIVATE=${WEBHOOK_ALLOW_PRIVATE:-false}
       # Permanently purge soft-deleted files from .trash/ after this many days (0 = never).
@@ -108,6 +110,8 @@ services:
       - PORT=3001
       - VAULT_NAME=${VAULT_NAME}
       - MCP_PUBLIC_URL=https://mcp.${DOMAIN}
+      # Vault access vs credential management are separate privileges.
+      - OAUTH_ADMIN_ROLE=${OAUTH_ADMIN_ROLE:-obsidian:admin}
       - ZITADEL_ISSUER=${ZITADEL_ISSUER:-https://zitadel-k9z6.srv828065.hstgr.cloud}
       - OAUTH_REQUIRED_ROLE=${OAUTH_REQUIRED_ROLE:-obsidian:access}
     labels:

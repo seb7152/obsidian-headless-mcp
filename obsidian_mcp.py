@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hmac
 import httpx
 import os
 import random
@@ -18,6 +19,11 @@ VAULT_NAME = os.getenv("VAULT_NAME", "")
 # OAuth 2.1 resource-server configuration (Zitadel) — see AuthMiddleware below
 ZITADEL_ISSUER = os.getenv("ZITADEL_ISSUER", "https://zitadel-k9z6.srv828065.hstgr.cloud")
 OAUTH_REQUIRED_ROLE = os.getenv("OAUTH_REQUIRED_ROLE", "obsidian:access")
+# Managing API credentials is a separate privilege from using the vault: an
+# OAuth identity needs this role on top of OAUTH_REQUIRED_ROLE to reach the
+# token tools. Revoke the role in Zitadel and the capability disappears without
+# touching anything else.
+OAUTH_ADMIN_ROLE = os.getenv("OAUTH_ADMIN_ROLE", "obsidian:admin")
 MCP_PUBLIC_URL = os.getenv("MCP_PUBLIC_URL", "")
 
 # HTTP client with auth header for all calls to obsidian-api
@@ -1388,6 +1394,90 @@ def list_webhooks() -> str:
     except Exception as e:
         return f"Error listing webhooks: {e}"
 
+@mcp.tool()
+def list_api_tokens() -> str:
+    """List the REST API tokens: name, scopes, path restrictions, expiry, last use.
+
+    Secrets are never returned — only the SHA-256 of each token is stored, so a
+    token's plaintext exists only in the response that created it.
+
+    Requires the obsidian:admin role (OAUTH_ADMIN_ROLE) for OAuth callers."""
+    try:
+        response = api_client.get(f"{OBSIDIAN_API_URL}/tokens")
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error listing API tokens: {e}"
+
+
+@mcp.tool()
+def create_api_token(
+    name: str,
+    scopes: list[str] = None,
+    path_allow: list[str] = None,
+    path_deny: list[str] = None,
+    expires_at: str = None,
+) -> str:
+    """Create a scoped REST API token. Requires the obsidian:admin role
+    (OAUTH_ADMIN_ROLE) for OAuth callers.
+
+    The plaintext token is in this response and nowhere else — only its SHA-256
+    is stored, so it cannot be shown again. Relay it to the user once, and say
+    plainly that it will not be recoverable.
+
+    Args:
+        name: What this token is for. It is what you read when deciding whether
+            to revoke it, so name the machine or the job, not the person.
+        scopes: Any of "read", "write", "admin". Default ["read"]. `write`
+            implies read; `admin` implies both and can mint further tokens.
+        path_allow: Vault-relative prefixes this token may reach, e.g.
+            ["20_Projects/Pro"]. Empty or omitted = the whole vault.
+        path_deny: Prefixes it may never reach, e.g. ["10_Context/Perso"].
+            Deny always wins over allow. Prefixes match whole path segments, so
+            "10_Context/Perso" never covers "10_Context/Perso2".
+        expires_at: YYYY-MM-DD, after which the token stops authenticating.
+            Set one for anything living on a machine you don't fully control.
+
+    Note: a path-restricted token cannot use POST /api/query — an arbitrary
+    SELECT is not safely filterable. It uses GET /api/files with frontmatter
+    filters instead."""
+    payload = {"name": name}
+    if scopes is not None:
+        payload["scopes"] = scopes
+    if path_allow is not None:
+        payload["path_allow"] = path_allow
+    if path_deny is not None:
+        payload["path_deny"] = path_deny
+    if expires_at is not None:
+        payload["expires_at"] = expires_at
+
+    try:
+        response = api_client.post(f"{OBSIDIAN_API_URL}/tokens", json=payload)
+        if response.status_code == 400:
+            return f"Invalid token request: {response.text}"
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error creating API token: {e}"
+
+
+@mcp.tool()
+def revoke_api_token(token_id: str) -> str:
+    """Revoke a REST API token by id (e.g. "tok_a1b2c3d4e5f6"). Takes effect on the
+    next request, with no restart. Requires the obsidian:admin role
+    (OAUTH_ADMIN_ROLE) for OAuth callers.
+
+    The record is kept so the audit trail (created, last used, last IP) survives."""
+    try:
+        response = api_client.delete(f"{OBSIDIAN_API_URL}/tokens/{token_id}")
+        if response.status_code == 404:
+            return f"No token with id {token_id}"
+        response.raise_for_status()
+        return response.text
+    except Exception as e:
+        return f"Error revoking API token: {e}"
+
+
 # ==================== RUN ====================
 
 ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
@@ -1424,21 +1514,176 @@ async def _fetch_userinfo(token: str) -> dict | None:
     return userinfo
 
 
+_TOKEN_CACHE_TTL = 45  # seconds — same reasoning as the userinfo cache above
+_token_cache: dict[str, tuple[float, dict | None]] = {}
+
+
+async def _verify_api_token(token: str) -> dict | None:
+    """Resolve a token against the REST token store, or None if it isn't one.
+
+    This container mounts no volume, so it cannot read the token file; and
+    reimplementing hashing, expiry and revocation here would be a second copy to
+    keep in step with tokens.js. It asks the API instead, with the root token,
+    and caches the answer briefly — keyed by a hash, never the token itself.
+
+    A revoked token therefore keeps working for at most _TOKEN_CACHE_TTL
+    seconds. That is the same window the OAuth path already accepts, and the
+    alternative is a round trip on every single MCP call.
+    """
+    import hashlib
+    import time
+
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = time.monotonic()
+    cached = _token_cache.get(token_hash)
+    if cached and cached[0] > now:
+        return cached[1]
+
+    principal = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{OBSIDIAN_API_URL}/tokens/verify",
+                headers={"Authorization": f"Bearer {API_TOKEN}"},
+                json={"token": token},
+            )
+        if response.status_code == 200:
+            body = response.json()
+            if body.get("valid"):
+                principal = body
+    except httpx.HTTPError:
+        principal = None
+
+    _token_cache[token_hash] = (now + _TOKEN_CACHE_TTL, principal)
+    return principal
+
+
 def _protected_resource_metadata_url() -> str:
     return f"{MCP_PUBLIC_URL.rstrip('/')}/.well-known/oauth-protected-resource"
 
 
+# Tools that manage API credentials. Gated on OAUTH_ADMIN_ROLE for OAuth callers,
+# and on the `admin` scope for tokens from the store.
+ADMIN_TOOLS = {"create_api_token", "list_api_tokens", "revoke_api_token"}
+
+
+def _mcp_token_refusal(principal: dict) -> str | None:
+    """Why this store token may not be used against MCP, or None if it may.
+
+    This server calls the REST API with the root API_TOKEN, so a token's scopes
+    and path restrictions are NOT enforced on the operations it triggers here.
+    Accepting a restricted token would therefore authenticate it without
+    honouring its limits — worse than refusing it, because it would look
+    contained while being root in practice.
+
+    So MCP takes only tokens that are already equivalent to root: unrestricted
+    by path, and carrying write. What they buy over the env API_TOKEN is a name,
+    an expiry, a last-used trail, and revocation one client at a time.
+
+    Path scoping over MCP needs the caller's credential to be forwarded to the
+    REST API per request, which is a separate piece of work.
+    """
+    if principal.get("root"):
+        return None
+
+    if principal.get("path_restricted"):
+        return (
+            "path-restricted tokens are refused here: MCP calls the REST API as root, "
+            "so path_allow/path_deny would not be enforced on what you do through it. "
+            "Use this token against the REST API directly, where scoping is enforced."
+        )
+
+    scopes = principal.get("scopes") or []
+    if "write" not in scopes and "admin" not in scopes:
+        return (
+            "read-only tokens are refused here: MCP calls the REST API as root, so the "
+            "read-only limit would not be enforced on what you do through it. "
+            "Use this token against the REST API directly, where scopes are enforced."
+        )
+
+    return None
+
+
+async def _buffered_receive(receive):
+    """Read the whole request body, returning it plus a receive() that replays it.
+
+    The authorization check needs to see which tool a request calls, and the body
+    can only be consumed once — so buffer it here and hand the app a replay.
+
+    Deliberately not a contextvar set around `await self.app(...)`: under
+    streamable HTTP a tool can execute in a task created before this request,
+    which would either lose the principal or, worse, see the previous request's.
+    Reading the body is unglamorous but leaves no room for that ambiguity."""
+    import json  # noqa: F401  (kept local, matching the rest of this module)
+
+    messages = []
+    body = b""
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message["type"] != "http.request":
+            break
+        body += message.get("body", b"")
+        if not message.get("more_body", False):
+            break
+
+    iterator = iter(messages)
+
+    async def replay():
+        try:
+            return next(iterator)
+        except StopIteration:
+            return await receive()
+
+    return body, replay
+
+
+def _admin_tools_called(body: bytes) -> set:
+    """Names of credential-management tools this JSON-RPC body invokes, if any."""
+    import json
+
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return set()
+
+    # A batch arrives as a JSON array; a single call as an object.
+    calls = payload if isinstance(payload, list) else [payload]
+    called = set()
+    for call in calls:
+        if not isinstance(call, dict) or call.get("method") != "tools/call":
+            continue
+        params = call.get("params")
+        name = params.get("name") if isinstance(params, dict) else None
+        if name in ADMIN_TOOLS:
+            called.add(name)
+    return called
+
+
 class AuthMiddleware:
-    """Accepts two authentication schemes, checked in this order:
+    """Accepts three credentials, checked in this order:
 
-    1. Legacy static token (kept for continuity — Claude Code CLI / Codex CLI use this
-       today, and it's simpler for them than OAuth):
-         - token as URL path prefix /{API_TOKEN}/...
-         - `Authorization: Bearer <API_TOKEN>` exact match
-       The URL-path variant is intended to be removed later; the static bearer token
-       is intended to stay.
+    1. Static token, as `Authorization: Bearer <API_TOKEN>` (kept for continuity —
+       Claude Code CLI / Codex CLI use this today, and it's simpler for them than
+       OAuth). Compared in constant time.
 
-    2. OAuth 2.1 resource-server flow (MCP spec, revisions 2025-06 / 2025-11), used by
+       The URL-path variant (`/{API_TOKEN}/...`) was removed on 2026-09-03: a token
+       in the path is logged by every proxy, reverse proxy and access log it passes
+       through, ends up in browser history and Referer headers, and cannot be
+       rotated out of any of those. A header is not logged by default anywhere in
+       that chain. Clients configured that way must move the token to the
+       Authorization header.
+
+    2. A named token from the store (tokens.js), resolved through
+       POST /api/tokens/verify and cached briefly. These exist so each client can
+       hold its own credential — named, expiring, individually revocable, with a
+       last-used trail — instead of everyone sharing the one env token.
+
+       Only tokens already equivalent to root are accepted here: unrestricted by
+       path, carrying write. See _mcp_token_refusal for why a restricted token is
+       refused rather than quietly run as root.
+
+    3. OAuth 2.1 resource-server flow (MCP spec, revisions 2025-06 / 2025-11), used by
        clients like claude.ai: any other bearer token is validated against Zitadel's
        /oidc/v1/userinfo endpoint. Zitadel is the authorization server; this server
        never handles login, it only validates the token presented on each request.
@@ -1479,27 +1724,31 @@ class AuthMiddleware:
             if decoded.lower().startswith("bearer "):
                 bearer_token = decoded[7:].strip()
 
-        # -- 1. Legacy static token (path prefix or exact bearer match) --
-        path_has_static_token = bool(API_TOKEN) and path.startswith(f"/{API_TOKEN}")
-        header_matches_static = bool(API_TOKEN) and bearer_token == API_TOKEN
+        # -- 1. Static token, Authorization header only (constant-time compare) --
+        header_matches_static = bool(API_TOKEN) and bearer_token is not None and hmac.compare_digest(
+            bearer_token, API_TOKEN
+        )
 
-        if path_has_static_token or header_matches_static:
-            scope = dict(scope)
-            if path_has_static_token:
-                new_path = path[len(f"/{API_TOKEN}"):] or "/"
-                scope["path"] = new_path
-                raw_path = scope.get("raw_path", path.encode())
-                scope["raw_path"] = raw_path[len(f"/{API_TOKEN}".encode()):] or b"/"
-            new_headers = [(k, v) for k, v in headers if k.lower() != b"host"]
-            new_headers.append((b"host", b"localhost"))
-            scope["headers"] = new_headers
-            await self.app(scope, receive, send)
-            return
+        if header_matches_static:
+            return await self._forward(scope, receive, send, headers, is_admin=True)
 
-        # -- 2. OAuth 2.1 (Zitadel) --
         if not bearer_token:
             await self._send_401(send, "invalid_request", "Missing bearer token")
             return
+
+        # -- 2. A named token from the store (revocable one at a time) --
+        principal = await _verify_api_token(bearer_token)
+        if principal is not None:
+            refusal = _mcp_token_refusal(principal)
+            if refusal:
+                await self._send_token_403(send, principal, refusal)
+                return
+            return await self._forward(
+                scope, receive, send, headers,
+                is_admin="admin" in (principal.get("scopes") or []),
+            )
+
+        # -- 3. OAuth 2.1 (Zitadel) --
 
         userinfo = await _fetch_userinfo(bearer_token)
         if userinfo is None:
@@ -1510,6 +1759,22 @@ class AuthMiddleware:
         if OAUTH_REQUIRED_ROLE not in roles:
             await self._send_403(send)
             return
+
+        return await self._forward(
+            scope, receive, send, headers, is_admin=OAUTH_ADMIN_ROLE in roles
+        )
+
+    async def _forward(self, scope, receive, send, headers, *, is_admin):
+        """Hand the request to the app, gating the credential-management tools.
+
+        Every accepted credential funnels through here, so the admin gate cannot
+        be skipped by adding an authentication branch and forgetting it."""
+        if not is_admin and scope.get("method") == "POST":
+            body, receive = await _buffered_receive(receive)
+            requested = _admin_tools_called(body)
+            if requested:
+                await self._send_admin_403(send, sorted(requested))
+                return
 
         scope = dict(scope)
         # Replace Host header with localhost to bypass FastMCP DNS rebinding protection
@@ -1558,6 +1823,37 @@ class AuthMiddleware:
         })
         await send({"type": "http.response.body", "body": body})
 
+    async def _send_token_403(self, send, principal, reason):
+        import json
+
+        body = json.dumps({
+            "error": "forbidden",
+            "error_description": f"Token \"{principal.get('name')}\": {reason}",
+        }).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def _send_admin_403(self, send, tools):
+        import json
+
+        body = json.dumps({
+            "error": "forbidden",
+            "error_description": (
+                f"{', '.join(tools)} requires the {OAUTH_ADMIN_ROLE} role. "
+                f"{OAUTH_REQUIRED_ROLE} grants vault access, not credential management."
+            ),
+        }).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 403,
+            "headers": [(b"content-type", b"application/json")],
+        })
+        await send({"type": "http.response.body", "body": body})
+
 
 if __name__ == "__main__":
     import uvicorn
@@ -1567,7 +1863,7 @@ if __name__ == "__main__":
 
     print(f"Starting Obsidian MCP Server on port {PORT}")
     print(f"Connected to Obsidian API at: {OBSIDIAN_API_URL}")
-    print(f"🔐 Authentication: legacy static token (path/Bearer) + OAuth 2.1 via Zitadel ({ZITADEL_ISSUER}), role required: {OAUTH_REQUIRED_ROLE}")
+    print(f"🔐 Authentication: static Bearer token + OAuth 2.1 via Zitadel ({ZITADEL_ISSUER}), role required: {OAUTH_REQUIRED_ROLE}, admin role for token management: {OAUTH_ADMIN_ROLE}")
 
     mcp_app = mcp.streamable_http_app()
     app = AuthMiddleware(mcp_app)

@@ -66,7 +66,8 @@ OBSIDIAN_EMAIL=your-obsidian-email@example.com
 OBSIDIAN_PASSWORD=your-account-password       # Obsidian account password (for `ob login`)
 VAULT_PASSWORD=your-vault-encryption-password # Vault encryption key (Obsidian → Settings → Sync → Encryption)
 VAULT_NAME=Your-Vault-Name                    # Exact vault name in Obsidian Sync
-API_TOKEN=your-secret-token                   # Shared token for REST API + MCP auth
+API_TOKEN=your-secret-token                   # Root token for REST API + MCP auth
+                                              # (scoped, revocable tokens are minted from it)
 ```
 
 ### 3. Deploy
@@ -81,9 +82,13 @@ Base URL: `https://obsidian-api.DOMAIN`
 
 All endpoints require:
 ```
-Authorization: Bearer <API_TOKEN>
+Authorization: Bearer <token>
 ```
 Exception: `GET /health` is public.
+
+The token is either the `API_TOKEN` from the environment (full access, not
+revocable without a restart) or a **scoped API token** — named, revocable,
+optionally read-only, path-restricted and expiring. See [API tokens](#api-tokens).
 
 ### Health
 
@@ -478,6 +483,99 @@ curl -H "Authorization: Bearer $TOKEN" \
 - `in_sync: false` means the indexed file count doesn't match the vault's actual `.md` file count — a full reindex (restart the service) will resync it.
 - `search.semantic_ready: false` with a non-zero `search.pending` means the embedding backfill is still running; searches answer with BM25 in the meantime. A non-null `search.embed_error` means it is stuck, not slow.
 
+### API tokens
+
+Hand a caller its own credential instead of sharing `API_TOKEN`. Each token
+carries scopes, path restrictions and an optional expiry, and can be revoked on
+its own without disturbing anything else.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/tokens` | List tokens (metadata only — secrets are never returned) |
+| `GET` | `/api/tokens/{id}` | Get one token |
+| `POST` | `/api/tokens` | Create a token — the plaintext is in this response and nowhere else |
+| `DELETE` | `/api/tokens/{id}` | Revoke, effective on the next request |
+| `POST` | `/api/tokens/verify` | Resolve a token to its principal — used by the MCP server |
+
+All four need the `admin` scope, which only `API_TOKEN` and tokens you
+explicitly create with it have.
+
+**Fields**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | **Required.** What this token is for — it is what you will read when deciding whether to revoke it. |
+| `scopes` | string[] | `read`, `write`, `admin`. Default `["read"]`. `write` implies `read`; `admin` implies both. |
+| `path_allow` | string[] | Vault-relative prefixes this token may reach. Empty = whole vault. |
+| `path_deny` | string[] | Prefixes it may never reach. **Deny always wins over allow.** |
+| `expires_at` | `YYYY-MM-DD` | After this date the token stops authenticating. Must be a real calendar date — an impossible one would sort after every real date and never expire. Optional, but set one for anything living on a machine you don't fully control. |
+
+Prefixes match on whole path segments, so `10_Context/Perso` covers
+`10_Context/Perso/profil.md` but never `10_Context/Perso2/`. Paths are
+canonicalised before the comparison — `.` and `..` are resolved, and a path
+climbing above the vault root or carrying a backslash is refused outright, so a
+prefix cannot be walked around with `20_Projects/Pro/../../10_Context/Perso/`.
+A prefix that cannot be canonicalised is rejected when the token is created,
+rather than silently dropped.
+
+```bash
+# A read-only token for a machine that should never see the personal zone
+curl -X POST -H "Authorization: Bearer $API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"work laptop","scopes":["read"],
+       "path_allow":["20_Projects/Pro","30_Knowledge"],
+       "path_deny":["10_Context/Perso"],
+       "expires_at":"2026-12-01"}' \
+  https://obsidian-api.yourdomain.com/api/tokens
+# → {"token":"obsv_…","id":"tok_a1b2c3d4e5f6","name":"work laptop",…}
+#   Copy the token now — only its SHA-256 is stored, it cannot be shown again.
+
+# See who is using what
+curl -H "Authorization: Bearer $API_TOKEN" https://obsidian-api.yourdomain.com/api/tokens
+# → each entry carries last_used_at and last_used_ip
+
+# Revoke
+curl -X DELETE -H "Authorization: Bearer $API_TOKEN" \
+  https://obsidian-api.yourdomain.com/api/tokens/tok_a1b2c3d4e5f6
+```
+
+**How restrictions are enforced**
+
+- Endpoints addressing one path (`/api/file/{path}` and its `/append`, `/move`,
+  `/body`, `/patch`, `/links` variants, `/api/directory/{path}`) return `403`
+  with the offending path.
+- Endpoints taking paths in the body (`/api/files/batch`, `/api/files/move`,
+  `/api/folders`, `/api/folders/move`) reject the **whole** request if any path
+  is out of scope, rather than silently doing part of the work.
+- Operations that carry a whole subtree — deleting or moving a folder — need
+  that subtree to be in scope, not merely reachable: a token allowed only
+  `20_Projects/Pro/Sub` may browse down through `20_Projects/Pro`, but may not
+  delete or move it, and may not take the parent of one of its own `path_deny`
+  prefixes either.
+- Listing endpoints (`/api/files`, `/api/search`, `/api/directory`,
+  `/api/projects`) filter results silently, so a restricted token cannot probe
+  for the existence of files it may not read. A directory that merely leads to
+  an allowed prefix stays browsable; its files do not become readable.
+- **`/api/query` is refused to path-restricted tokens.** An arbitrary `SELECT`
+  cannot be filtered safely — an aggregate such as `group_concat(path)` would
+  leak content without ever returning a path column. Use `/api/files` with
+  frontmatter filters, which is properly scoped. Unrestricted tokens keep SQL.
+- **`/api/webhooks` and `/api/tokens` require `admin`**, because both can bypass
+  path restrictions: a webhook with `include_body` streams file contents to an
+  arbitrary URL, and token creation can mint an unrestricted credential.
+- `/api/files/batch`, `/api/query` and `/api/links/check` are reads that use
+  POST for their body, and need `read`, not `write`.
+
+**Storage.** `/data/tokens.json` (the `sqlite-data` volume), outside the synced
+vault, written atomically. Override with `TOKENS_CONFIG_PATH`. Only SHA-256
+hashes are kept: a leak of that file yields nothing usable. Revoked tokens stay
+in the file so their audit trail survives.
+
+**From MCP**: `list_api_tokens()` and `revoke_api_token(id)` are exposed.
+Creation deliberately is not — the MCP server proxies to the REST API with the
+root `API_TOKEN`, so exposing creation would let any MCP caller mint an
+unrestricted credential. Revocation is safe to expose because it only ever
+removes access.
+
 ### Webhooks
 
 Notify external systems (n8n, Zapier, your own service…) whenever vault files change. The embedded watcher detects `add` / `change` / `unlink` on `.md` files and POSTs a JSON payload to your URL. Webhooks are **created and managed only through the REST API** — the MCP server can list them but never create them.
@@ -554,10 +652,22 @@ Exposes the vault as MCP tools and resources for AI agents. Base URL: `https://m
 
 ### Authentication
 
-Three methods are supported, checked in this order:
+Two methods are supported, checked in this order:
 
-**1. Authorization header with the static token (recommended for Claude Code CLI / Codex CLI —
-simpler than OAuth for those clients)**
+**1. Authorization header — the env `API_TOKEN`, or any named token from the store
+(recommended for Claude Code CLI / Codex CLI — simpler than OAuth for those clients)**
+
+Prefer a named token over the shared `API_TOKEN`: one per client means you can
+revoke the laptop's without touching n8n's, and `last_used_at` tells you whether
+a key is still in use before you kill it.
+
+> **MCP takes only unrestricted tokens.** This server calls the REST API with the
+> root `API_TOKEN`, so a token's scopes and paths are *not* enforced on what you
+> do through MCP. A path-restricted or read-only token is therefore **refused**
+> with a `403` explaining why, rather than quietly running as root. Use such
+> tokens against the REST API directly, where they are enforced. Scoping over
+> MCP would require forwarding the caller's credential per request — separate
+> work, not done here.
 ```json
 {
   "mcpServers": {
@@ -572,19 +682,14 @@ simpler than OAuth for those clients)**
 }
 ```
 
-**2. Token in URL path (legacy — planned for removal later)**
-```json
-{
-  "mcpServers": {
-    "obsidian": {
-      "url": "https://mcp.yourdomain.com/<API_TOKEN>",
-      "transport": "http"
-    }
-  }
-}
-```
+> **Removed 2026-09-03 — token in the URL path.** `https://mcp.DOMAIN/<API_TOKEN>`
+> is no longer accepted and returns `401`. A token in a URL is written to every
+> proxy and access log it crosses, lands in browser history and `Referer`
+> headers, and cannot be scrubbed from any of them afterwards; a header is not
+> logged by default anywhere in that chain. Clients configured that way must
+> move the token into `Authorization: Bearer`, as in method 1 above.
 
-**3. OAuth 2.1 + PKCE (Zitadel)** — used automatically by OAuth-aware clients like claude.ai
+**2. OAuth 2.1 + PKCE (Zitadel)** — used automatically by OAuth-aware clients like claude.ai
 when no static token is presented:
 ```json
 {
@@ -605,6 +710,10 @@ On first connection such a client will:
 For OAuth requests, access is granted only to users holding the `obsidian:access` project role
 in Zitadel — the server checks this via `/oidc/v1/userinfo` on every request (see
 [Security Notes](#security-notes)).
+
+A second role, **`obsidian:admin`** (`OAUTH_ADMIN_ROLE`), gates the API-token
+tools on top of that. `obsidian:access` lets an identity work in the vault;
+`obsidian:admin` lets it hand out and revoke credentials.
 
 ### Resources
 
@@ -677,6 +786,33 @@ Read and write [Document Comments](https://github.com/kylemcd/obsidian-document-
 |------|-------------|
 | `list_webhooks()` | List active vault-change webhooks (secrets redacted). Webhooks are created/managed via the REST API, not from MCP. |
 
+#### API tokens
+
+| Tool | Description |
+|------|-------------|
+| `list_api_tokens()` | List the scoped REST API tokens — name, scopes, path restrictions, expiry, last use. Secrets are never returned. |
+| `create_api_token(name, scopes, path_allow, path_deny, expires_at)` | Mint a token. The plaintext is in the response and nowhere else. |
+| `revoke_api_token(token_id)` | Revoke a token by id, effective on the next request. |
+
+These three require the **`obsidian:admin`** role (`OAUTH_ADMIN_ROLE`) on top of
+`obsidian:access`. Using the vault and handing out credentials that reach it are
+separate privileges: an identity can be given one without the other, and the
+capability is withdrawn by removing the role in Zitadel — no redeploy, nothing
+else affected.
+
+The check runs in `AuthMiddleware`, which inspects the JSON-RPC body for a
+`tools/call` naming one of these tools and returns `403` before the request ever
+reaches the tool. It is deliberately not a contextvar set around the app call:
+under streamable HTTP a tool can execute in a task created before the current
+request, which would either lose the principal or — worse — inherit the previous
+request's.
+
+Callers presenting the static `API_TOKEN` pass this gate. That is not a
+loophole so much as an acknowledgement: `API_TOKEN` is already root on the REST
+API, so anyone holding it can `POST /api/tokens` directly. The role separation
+is meaningful **between OAuth identities**, and becomes airtight once the static
+Bearer path is removed from the MCP server too (the URL-path one already is).
+
 ---
 
 ## Troubleshooting
@@ -732,6 +868,13 @@ which half of the index is actually working.
 - Obsidian Sync provides end-to-end encryption for vault data at rest
 - Directory traversal is blocked server-side on all file endpoints
 - **Webhooks**: created only via the authenticated REST API (never from MCP); the config lives outside the synced vault (`/data/webhooks.json`); secrets are stored server-side and redacted in all API/MCP responses. SSRF is blocked by default — only public `https://` targets are allowed, redirects are not followed, and the destination is re-validated before every delivery. Loosen this only via `WEBHOOK_ALLOW_PRIVATE=true` for trusted internal receivers.
+- **MCP credential management**: `create_api_token` / `list_api_tokens` /
+  `revoke_api_token` require the `obsidian:admin` role, checked in the auth
+  middleware before the request reaches the tool. Note that the static
+  `API_TOKEN` also passes, since it is already root on the REST API and could
+  call `POST /api/tokens` directly — the separation bites between OAuth
+  identities, and would become absolute if the static Bearer path were retired
+  too (the URL-path variant already is).
 - **MCP OAuth**: the MCP server (`mcp.DOMAIN`) also accepts OAuth 2.1 + PKCE via Zitadel
   alongside the static `API_TOKEN`. For OAuth requests, every bearer token is validated
   against Zitadel's `/oidc/v1/userinfo`, and access is denied (`403`) unless the token's
@@ -739,8 +882,9 @@ which half of the index is actually working.
   Zitadel doesn't support RFC 8707 resource indicators: a token issued for the shared
   `Claude-web` client can carry an audience covering every MCP server in the `mcp-servers`
   project, not just this one, so a valid signature alone isn't proof of authorization for
-  this specific server. The URL-path token variant is planned for removal later; the
-  static Bearer token is intended to stay alongside OAuth.
+  this specific server. The URL-path token variant was removed on 2026-09-03 (a
+  token in a URL is logged everywhere it travels and cannot be scrubbed back
+  out); the static Bearer token, compared in constant time, stays alongside OAuth.
 
 ---
 
@@ -878,9 +1022,14 @@ Optional cloud reranking of search candidates (Jina, Cohere, Voyage), with the
 ### `webhooks.js`
 Webhook configuration, matching, and delivery. Persists webhooks to `/data/webhooks.json` (atomic writes), filters changes by folder glob and frontmatter subset, and POSTs signed payloads with bounded concurrency, timeouts, retries, and SSRF protection. Created/managed via the REST API; listed read-only via MCP.
 
+### `tokens.js`
+Scoped API tokens: creation, hashing, lookup and the allow/deny path logic.
+Persists to `/data/tokens.json` (atomic writes), stores SHA-256 only, and never
+returns a secret after creation.
+
 ### `obsidian_mcp.py`
 FastMCP server with streamable HTTP transport. Proxies all operations to the REST API. Includes
-`AuthMiddleware`, which accepts either the legacy static token (URL-path or Bearer header) or
+`AuthMiddleware`, which accepts either the static token (Bearer header, constant-time compare) or
 an OAuth 2.1 access token validated against Zitadel, plus the `/.well-known/oauth-protected-resource`
 metadata endpoint required by OAuth-aware MCP clients.
 
