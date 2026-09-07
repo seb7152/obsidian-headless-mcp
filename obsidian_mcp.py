@@ -15,6 +15,14 @@ OBSIDIAN_API_URL = os.getenv("OBSIDIAN_API_URL", "http://localhost:3000/api")
 PORT = int(os.getenv("PORT", 3001))
 API_TOKEN = os.getenv("API_TOKEN", "")
 VAULT_NAME = os.getenv("VAULT_NAME", "")
+# uvicorn closes idle connections after 5s by default, but reverse proxies and
+# HTTP clients keep pooled connections far longer (Traefik: 90s). The proxy then
+# sends a request onto a socket uvicorn is closing: the request arrives and the
+# tool RUNS, but the SSE response never reaches the client, which reports
+# "SSE stream ended without a response" for an operation that actually
+# succeeded — and retries it. Outliving the longest upstream pool makes the
+# client always the side that closes.
+KEEPALIVE_TIMEOUT = int(os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", 120))
 
 # OAuth 2.1 resource-server configuration (Zitadel) — see AuthMiddleware below
 ZITADEL_ISSUER = os.getenv("ZITADEL_ISSUER", "https://zitadel-k9z6.srv828065.hstgr.cloud")
@@ -1868,4 +1876,4 @@ if __name__ == "__main__":
     mcp_app = mcp.streamable_http_app()
     app = AuthMiddleware(mcp_app)
 
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run(app, host="0.0.0.0", port=PORT, timeout_keep_alive=KEEPALIVE_TIMEOUT)
